@@ -37,15 +37,15 @@ When known, rate limits and upstream outages set the **`Retry-After`** response 
 | code | HTTP | retryable | When |
 |------|------|-----------|------|
 | `unauthenticated` | 401 | no | No `cs_session` cookie (caller must sign in). |
-| `session_expired` | 401 | no | Cookie present but session expired/revoked/unknown, or stored Blizzard token invalid/unauthorized (caller must clear session and sign in again). |
+| `session_expired` | 401 | no | Cookie present but session expired/revoked/unknown or malformed (non-UUID) — response clears `cs_session`, or stored Blizzard token invalid/unauthorized (caller must clear session and sign in again). |
 | `csrf_failed` | 403 | no | Missing/mismatched `X-CSRF-Token` on a mutating cookie request. |
-| `validation_error` | 400 | no | Body/query failed validation (`errors` field map when present). |
+| `validation_error` | 400 | no | Body/query failed validation (`errors` field map when present; malformed JSON → `{"errors":{"body":"invalid_json"}}`). |
 | `not_found` | 404 | no | Resource not visible / does not exist. |
 | `forbidden` | 403 | no | Authenticated but not allowed. |
-| `rate_limited` | 429 | **yes** | Rate limit exceeded; honor `Retry-After`. |
+| `rate_limited` | 429 | **yes** | Rate limit exceeded; `Retry-After` sent when known — honor it. |
 | `version_mismatch` | 409 | **yes** | Optimistic concurrency failure; reload and retry. |
 | `character_not_displayed` | 409 | no | Character not in the display set. |
-| `list_limit_reached` | 409 | no | Max gear lists per character (20). |
+| `list_limit_reached` | 409 | no | Max gear lists per character (20); `error.details.limit` carries the cap. |
 | `precondition_required` | 428 | no | `If-Match` required. |
 | `upstream_unavailable` | 502/503 | **yes** | Battle.net (or other upstream) 5xx/timeout; `Retry-After` when known. |
 | `payload_too_large` | 413 | no | Body exceeds size limit. |

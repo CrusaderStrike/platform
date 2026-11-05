@@ -97,7 +97,9 @@ describe('gear lists (platform#17)', () => {
       payload: { name: 'List 21', type: 'max_level' },
     });
     expect(twentyFirst.statusCode).toBe(409);
-    expect(twentyFirst.json()).toMatchObject({ error: { code: 'list_limit_reached' } });
+    expect(twentyFirst.json()).toMatchObject({
+      error: { code: 'list_limit_reached', retryable: false, details: { limit: 20 } },
+    });
 
     const listed = await ctx.app.inject({
       method: 'GET',

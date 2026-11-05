@@ -90,12 +90,15 @@ export type AppErrorOpts = {
   retryable?: boolean;
   /** When set, error handler sends Retry-After (seconds). */
   retryAfterSec?: number;
+  /** Optional structured, non-sensitive details (e.g. `{ limit: 20 }`). */
+  details?: Record<string, unknown>;
 };
 
 export class AppError extends Error {
   public fields?: Record<string, string>;
   public retryable: boolean;
   public retryAfterSec?: number;
+  public details?: Record<string, unknown>;
 
   constructor(
     public statusCode: number,
@@ -112,6 +115,9 @@ export class AppError extends Error {
     if (opts?.retryAfterSec !== undefined) {
       this.retryAfterSec = opts.retryAfterSec;
     }
+    if (opts?.details !== undefined) {
+      this.details = opts.details;
+    }
   }
 }
 
@@ -121,15 +127,32 @@ export function publicErrorBody(
   message: string,
   requestId: string,
   retryable: boolean,
-): { error: { code: string; message: string; retryable: boolean; request_id: string } } {
+  details?: Record<string, unknown>,
+): {
+  error: {
+    code: string;
+    message: string;
+    retryable: boolean;
+    request_id: string;
+    details?: Record<string, unknown>;
+  };
+} {
   return {
     error: {
       code,
       message,
       retryable,
       request_id: requestId,
+      ...(details ? { details } : {}),
     },
   };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True when `s` is a canonical UUID string (safe to pass to a Postgres uuid column). */
+export function isUuid(s: unknown): s is string {
+  return typeof s === 'string' && UUID_RE.test(s);
 }
 
 export function requestId(): string {
