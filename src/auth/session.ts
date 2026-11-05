@@ -11,7 +11,7 @@ export type RequestSession = {
   userId: string;
   battletag: string;
   csrfToken: string;
-  preferredRegion: 'us' | 'eu';
+  preferredRegion: 'us' | 'eu' | 'kr' | 'tw';
   activeGuildId: string | null;
 };
 

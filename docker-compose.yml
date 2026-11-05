@@ -20,7 +20,9 @@ services:
     environment:
       DATABASE_URL: postgres://crusaderstrike:crusaderstrike@db:5432/crusaderstrike
       SESSION_SECRET: local-dev-session-secret-at-least-32-chars
+      TOKEN_ENC_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       BLIZZARD_MOCK: "true"
+      BLIZZARD_REGIONS: us,eu
       PUBLIC_WEB_ORIGIN: http://localhost:8080
       PUBLIC_API_ORIGIN: http://localhost:3000
       BLIZZARD_REDIRECT_URI: http://localhost:3000/api/v1/auth/blizzard/callback

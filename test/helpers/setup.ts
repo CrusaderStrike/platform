@@ -11,6 +11,9 @@ import { startMockBlizzard, type MockBlizzard } from '../../src/blizzard/mock.js
 import { createBlizzardClient } from '../../src/blizzard/client.js';
 import type { FastifyInstance } from 'fastify';
 
+export const TEST_TOKEN_ENC_KEY =
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
 export type TestCtx = {
   app: FastifyInstance;
   pool: Pool;
@@ -62,6 +65,7 @@ async function ensurePg(): Promise<string> {
 export async function startTestApp(opts?: {
   failUpstream?: boolean;
   emptyRoster?: boolean;
+  regions?: string;
 }): Promise<TestCtx> {
   const url = await ensurePg();
   const pool = createPool(url);
@@ -79,7 +83,9 @@ export async function startTestApp(opts?: {
     PORT: '3456',
     DATABASE_URL: url,
     SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
+    TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
     BLIZZARD_MOCK: 'true',
+    BLIZZARD_REGIONS: opts?.regions ?? 'us,eu',
     PUBLIC_WEB_ORIGIN: 'https://crusaderstrike.com',
     PUBLIC_API_ORIGIN: 'http://127.0.0.1',
     BLIZZARD_REDIRECT_URI: 'http://127.0.0.1/api/v1/auth/blizzard/callback',
@@ -89,6 +95,8 @@ export async function startTestApp(opts?: {
 
   const blizzard = createBlizzardClient({
     ...mock.config,
+    region: config.BLIZZARD_REGION,
+    regions: config.BLIZZARD_REGIONS,
     redirectUri: config.BLIZZARD_REDIRECT_URI,
   });
 
@@ -99,7 +107,7 @@ export async function startTestApp(opts?: {
     redirectUri: config.BLIZZARD_REDIRECT_URI,
   });
   await app.ready();
-  app.clearRefreshCooldowns?.();
+  await app.clearRefreshCooldowns?.();
 
   return {
     app,

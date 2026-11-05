@@ -1,3 +1,5 @@
+import type { BlizzardRegion } from './regions.js';
+
 export type BlizzardTokenResponse = {
   access_token: string;
   token_type: string;
@@ -37,7 +39,7 @@ export type NormalizedCharacter = {
   surname: string | null;
   realm: string | null;
   realmId: number | null;
-  region: 'us' | 'eu';
+  region: BlizzardRegion;
   faction: 'alliance' | 'horde' | null;
   class: string | null;
   race: string | null;

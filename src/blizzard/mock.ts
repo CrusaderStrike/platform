@@ -191,7 +191,25 @@ export async function startMockBlizzard(
           send(res, 404, { code: 404, type: 'BLZ-API-ENOENT' });
           return;
         }
-        const forever = FIXTURE_CHARS.filter((c) => (c as { _game?: string })._game !== 'other');
+        const region = ns.replace('profile-forever-', '');
+        let forever = FIXTURE_CHARS.filter((c) => (c as { _game?: string })._game !== 'other');
+        if (region === 'eu') {
+          forever = [
+            {
+              id: 2001,
+              name: 'Stormcaller',
+              surname: 'Silvervein',
+              realm: { name: 'Everlook', id: 2, slug: 'everlook' },
+              playable_class: { name: 'Shaman', id: 7 },
+              playable_race: { name: 'Troll', id: 8 },
+              faction: { type: 'HORDE', name: 'Horde' },
+              level: 60,
+            },
+          ];
+        } else if (region !== 'us') {
+          // kr/tw empty by default in mock unless fixtures added
+          forever = [];
+        }
         send(res, 200, { wow_accounts: [{ id: 1, characters: forever }] });
         return;
       }
@@ -211,6 +229,7 @@ export async function startMockBlizzard(
     clientId: 'mock-client-id',
     clientSecret: 'mock-client-secret',
     region: 'us',
+    regions: ['us', 'eu'],
     authorizeUrl: `${baseUrl}/oauth/authorize`,
     tokenUrl: `${baseUrl}/oauth/token`,
     apiBaseUrl: baseUrl,
@@ -223,7 +242,7 @@ export async function startMockBlizzard(
     baseUrl,
     authorizeUrl: config.authorizeUrl,
     tokenUrl: config.tokenUrl,
-    apiBaseUrl: config.apiBaseUrl,
+    apiBaseUrl: config.apiBaseUrl ?? baseUrl,
     client,
     config,
     options,

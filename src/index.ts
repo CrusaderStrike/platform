@@ -13,7 +13,8 @@ async function main() {
   let blizzard = createBlizzardClient({
     clientId: config.BLIZZARD_CLIENT_ID || 'unused',
     clientSecret: config.BLIZZARD_CLIENT_SECRET || 'unused',
-    region: config.BLIZZARD_REGION === 'eu' ? 'eu' : 'us',
+    region: config.BLIZZARD_REGION,
+    regions: config.BLIZZARD_REGIONS,
     authorizeUrl: config.BLIZZARD_OAUTH_AUTHORIZE_URL,
     tokenUrl: config.BLIZZARD_OAUTH_TOKEN_URL,
     apiBaseUrl: config.BLIZZARD_API_BASE_URL,
@@ -22,14 +23,12 @@ async function main() {
 
   if (config.BLIZZARD_MOCK) {
     const mock = await startMockBlizzard();
-    blizzard = mock.client;
-    // Point authorize/token/api at the mock by rebuilding client from mock config,
-    // and rewrite redirect to our local callback when developing.
     blizzard = createBlizzardClient({
       ...mock.config,
+      regions: config.BLIZZARD_REGIONS,
+      region: config.BLIZZARD_REGION,
       redirectUri: config.BLIZZARD_REDIRECT_URI,
     });
-    // Keep mock process alive for the server lifetime.
     (globalThis as { __csMockBlizzard?: unknown }).__csMockBlizzard = mock;
     console.log(`Blizzard mock listening on ${mock.baseUrl}`);
   }

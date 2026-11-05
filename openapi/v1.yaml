@@ -312,12 +312,13 @@ paths:
     get:
       tags: [gear]
       operationId: getCharacterGear
-      summary: Equipped gear for a character (guild-visible)
+      summary: Equipped gear for a character (owner-only for now)
       description: |
         Per-character **equipped** gear (what the character is wearing), distinct from event-sourced
-        gear *wishlists* under `/gear-lists` (platform#17). Readable by any signed-in member who can
-        see the character under guild visibility rules (owner always can). Empty slots are omitted.
-        Item objects use **camelCase** `itemId` (Web Dev mock contract).
+        gear *wishlists* under `/gear-lists` (platform#17). **Slice 1 / until platform#2 memberships:**
+        owner-only. Non-owners (and unknown ids) get **404** so existence is not leaked. Guild-visible
+        reads land after #2. Empty slots are omitted. Item objects use **camelCase** `itemId`
+        (Web Dev mock contract).
       parameters:
         - name: character_id
           in: path
@@ -330,7 +331,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CharacterGear' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [gear]
@@ -338,7 +338,8 @@ paths:
       summary: Replace equipped gear (owner-only, CSRF-protected, full replace)
       description: |
         Owner-only. Full replace of the equipped set. At most one item per slot. Unknown slots or
-        duplicate slots return 400. Non-owners get 403. Wishlist edits stay on `/gear-lists`.
+        duplicate slots return 400. Non-owners get **404** (same as GET) until guild visibility in #2;
+        widen to 403 for known non-owners after memberships land. Wishlist edits stay on `/gear-lists`.
         Body items use camelCase `itemId`.
       parameters:
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -1169,7 +1170,7 @@ components:
         corrections: { type: array, items: { $ref: '#/components/schemas/RunCorrection' } }
     Region:
       type: string
-      enum: [us, eu]
+      enum: [us, eu, kr, tw]
     Character:
       type: object
       description: WoW Forever character from Battle.net profile namespace `profile-forever-{region}`.

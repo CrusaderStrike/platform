@@ -1,15 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from '../db/pool.js';
+import type { Config } from '../config.js';
 import type { BlizzardClient } from '../blizzard/client.js';
+import { decryptSecret } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
+import { isBlizzardRegion } from '../blizzard/regions.js';
 import * as store from '../auth/store.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
 
 const REFRESH_COOLDOWN_MS = 60_000;
-const lastRefresh = new Map<string, number>();
 
 export type ProfileDeps = {
   pool: Pool;
+  config: Config;
   blizzard: BlizzardClient;
 };
 
@@ -24,8 +27,10 @@ function characterListBody(
   };
 }
 
+const PROFILE_UPDATE_KEYS = new Set(['preferred_region']);
+
 export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileDeps): Promise<void> {
-  const { pool, blizzard } = deps;
+  const { pool, config, blizzard } = deps;
 
   app.get('/api/v1/me/profile', async (req) => {
     const s = requireSession(req);
@@ -44,11 +49,22 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
   app.put('/api/v1/me/profile', async (req) => {
     requireCsrf(req);
     const s = requireSession(req);
-    const body = (req.body ?? {}) as { preferred_region?: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      throw new AppError(400, 'validation_error', 'Invalid profile.', {
+        body: 'Expected a JSON object.',
+      });
+    }
+    const unknown = Object.keys(body).filter((k) => !PROFILE_UPDATE_KEYS.has(k));
+    if (unknown.length) {
+      throw new AppError(400, 'validation_error', 'Unknown profile fields.', {
+        body: `Unknown fields: ${unknown.join(', ')}`,
+      });
+    }
     if (body.preferred_region !== undefined) {
-      if (body.preferred_region !== 'us' && body.preferred_region !== 'eu') {
+      if (typeof body.preferred_region !== 'string' || !isBlizzardRegion(body.preferred_region)) {
         throw new AppError(400, 'validation_error', 'Invalid preferred_region.', {
-          preferred_region: 'Must be us or eu.',
+          preferred_region: 'Must be us, eu, kr, or tw.',
         });
       }
       await store.updatePreferredRegion(pool, s.userId, body.preferred_region);
@@ -75,25 +91,33 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
   app.post('/api/v1/me/characters/refresh', async (req, reply) => {
     requireCsrf(req);
     const s = requireSession(req);
+    const last = await store.getLastRefreshedAt(pool, s.userId);
     const now = Date.now();
-    const prev = lastRefresh.get(s.userId) ?? 0;
-    const retryAfter = Math.ceil((prev + REFRESH_COOLDOWN_MS - now) / 1000);
-    if (retryAfter > 0) {
-      reply.header('Retry-After', String(retryAfter));
-      throw new AppError(429, 'rate_limited', 'Character refresh is rate-limited. Try again shortly.');
+    if (last) {
+      const retryAfter = Math.ceil((last.getTime() + REFRESH_COOLDOWN_MS - now) / 1000);
+      if (retryAfter > 0) {
+        reply.header('Retry-After', String(retryAfter));
+        throw new AppError(429, 'rate_limited', 'Character refresh is rate-limited. Try again shortly.');
+      }
     }
-    lastRefresh.set(s.userId, now);
+    await store.touchLastRefreshed(pool, s.userId);
 
     const user = await store.getUser(pool, s.userId);
     if (!user?.access_token) {
       throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
     }
+    let access: string;
     try {
-      const pulled = await blizzard.fetchForeverCharacters(user.access_token, user.preferred_region);
+      access = decryptSecret(user.access_token, config.TOKEN_ENC_KEY);
+    } catch (err) {
+      req.log.error({ err }, 'token decrypt failed');
+      throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
+    }
+    try {
+      const pulled = await blizzard.fetchForeverCharactersAll(access);
       await store.replaceCharacters(pool, s.userId, pulled);
     } catch (err) {
       req.log.error({ err }, 'character refresh failed');
-      // Allow retry sooner on hard upstream failure by not counting? Spec: still rate-limit attempts.
       throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
     }
     const chars = await store.listCharacters(pool, s.userId);
@@ -140,12 +164,18 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     return { selection: store.selectionToApi(selection) };
   });
 
-  // Test helper: clear in-memory refresh cooldown between cases
-  app.decorate('clearRefreshCooldowns', () => lastRefresh.clear());
+  // Test helper: clear Postgres refresh cooldown between cases
+  app.decorate('clearRefreshCooldowns', async (userId?: string) => {
+    if (userId) {
+      await store.clearLastRefreshed(pool, userId);
+      return;
+    }
+    await pool.query(`UPDATE users SET last_refreshed_at = NULL`);
+  });
 }
 
 declare module 'fastify' {
   interface FastifyInstance {
-    clearRefreshCooldowns?: () => void;
+    clearRefreshCooldowns?: (userId?: string) => Promise<void>;
   }
 }

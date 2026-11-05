@@ -73,7 +73,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     blizzard: opts.blizzard,
     redirectUri,
   });
-  await registerProfileRoutes(app, { pool: opts.pool, blizzard: opts.blizzard });
+  await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
   await registerGearRoutes(app, { pool: opts.pool });
 
   return app;

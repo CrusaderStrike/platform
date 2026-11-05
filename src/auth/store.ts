@@ -8,10 +8,11 @@ export type UserRow = {
   id: string;
   battlenet_id: string;
   battletag: string;
-  preferred_region: 'us' | 'eu';
+  preferred_region: 'us' | 'eu' | 'kr' | 'tw'
   access_token: string | null;
   refresh_token: string | null;
   token_expires_at: Date | null;
+  last_refreshed_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -34,7 +35,7 @@ export type CharacterRow = {
   surname: string | null;
   realm: string | null;
   realm_id: number | null;
-  region: 'us' | 'eu';
+  region: 'us' | 'eu' | 'kr' | 'tw'
   faction: 'alliance' | 'horde' | null;
   class: string | null;
   race: string | null;
@@ -89,7 +90,7 @@ export async function upsertUserFromBattleNet(
     accessToken: string;
     refreshToken?: string | null;
     expiresIn?: number;
-    preferredRegion?: 'us' | 'eu';
+    preferredRegion?: 'us' | 'eu' | 'kr' | 'tw'
   },
 ): Promise<UserRow> {
   const expiresAt = args.expiresIn
@@ -127,8 +128,8 @@ export async function createSession(db: Db, userId: string): Promise<SessionRow>
   return res.rows[0]!;
 }
 
-export async function getSession(db: Db, sessionId: string): Promise<(SessionRow & { battletag: string; preferred_region: 'us' | 'eu' }) | null> {
-  const res = await db.query<SessionRow & { battletag: string; preferred_region: 'us' | 'eu' }>(
+export async function getSession(db: Db, sessionId: string): Promise<(SessionRow & { battletag: string; preferred_region: 'us' | 'eu' | 'kr' | 'tw' }) | null> {
+  const res = await db.query<SessionRow & { battletag: string; preferred_region: 'us' | 'eu' | 'kr' | 'tw' }>(
     `SELECT s.*, u.battletag, u.preferred_region
      FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
@@ -151,7 +152,7 @@ export async function getUser(db: Db, userId: string): Promise<UserRow | null> {
 export async function updatePreferredRegion(
   db: Db,
   userId: string,
-  region: 'us' | 'eu',
+  region: 'us' | 'eu' | 'kr' | 'tw',
 ): Promise<UserRow> {
   const res = await db.query<UserRow>(
     `UPDATE users SET preferred_region = $2, updated_at = now() WHERE id = $1 RETURNING *`,
@@ -329,6 +330,28 @@ export async function putCharacterGear(
     items: Array.isArray(row.items) ? row.items : [],
     updated_at: row.updated_at,
   };
+}
+
+
+export async function getLastRefreshedAt(db: Db, userId: string): Promise<Date | null> {
+  const res = await db.query<{ last_refreshed_at: Date | null }>(
+    `SELECT last_refreshed_at FROM users WHERE id = $1`,
+    [userId],
+  );
+  return res.rows[0]?.last_refreshed_at ?? null;
+}
+
+export async function touchLastRefreshed(db: Db, userId: string): Promise<Date> {
+  const res = await db.query<{ last_refreshed_at: Date }>(
+    `UPDATE users SET last_refreshed_at = now(), updated_at = now() WHERE id = $1
+     RETURNING last_refreshed_at`,
+    [userId],
+  );
+  return res.rows[0]!.last_refreshed_at;
+}
+
+export async function clearLastRefreshed(db: Db, userId: string): Promise<void> {
+  await db.query(`UPDATE users SET last_refreshed_at = NULL WHERE id = $1`, [userId]);
 }
 
 export function characterToApi(c: CharacterRow) {

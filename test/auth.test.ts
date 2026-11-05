@@ -1,5 +1,7 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { shutdownEmbeddedPg, signIn, startTestApp, type TestCtx } from './helpers/setup.js';
+import { loadConfig } from '../src/config.js';
+import { isSafeReturnTo, safeWebRedirect } from '../src/lib/crypto.js';
+import { shutdownEmbeddedPg, signIn, startTestApp, TEST_TOKEN_ENC_KEY, type TestCtx } from './helpers/setup.js';
 
 describe('Blizzard OAuth + characters (#11)', () => {
   let ctx: TestCtx;
@@ -37,16 +39,19 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(chars.statusCode).toBe(200);
     const list = chars.json() as {
       game: string;
-      characters: Array<{ id: string; game: string; character_name: string }>;
+      characters: Array<{ id: string; game: string; character_name: string; region: string }>;
       selection: null;
     };
     expect(list.game).toBe('wow_forever');
     expect(list.selection).toBeNull();
     expect(list.characters.every((c) => c.game === 'wow_forever')).toBe(true);
     expect(list.characters.map((c) => c.character_name)).toEqual(
-      expect.arrayContaining(['Lightbringer', 'Ashenvow', 'Thornquill', 'Grimlantern']),
+      expect.arrayContaining(['Lightbringer', 'Ashenvow', 'Thornquill', 'Grimlantern', 'Stormcaller']),
     );
     expect(list.characters.find((c) => c.character_name === 'Filtered')).toBeUndefined();
+    expect(list.characters.find((c) => c.character_name === 'Stormcaller')?.region).toBe('eu');
+    expect(list.characters.find((c) => c.character_name === 'Lightbringer')?.region).toBe('us');
+    expect(list.characters.find((c) => c.character_name === 'Lightbringer')?.id).toMatch(/^ch_us_/);
 
     const main = list.characters.find((c) => c.character_name === 'Lightbringer')!;
     const alt = list.characters.find((c) => c.character_name === 'Thornquill')!;
@@ -123,18 +128,29 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(String(callback.headers.location)).toContain('reason=upstream_unavailable');
   });
 
-  it('rejects unsafe return_to', async () => {
+  it('rejects unsafe return_to including open-redirect variants', async () => {
     ctx = await startTestApp();
-    const bad = await ctx.app.inject({
-      method: 'GET',
-      url: '/api/v1/auth/blizzard/login?return_to=' + encodeURIComponent('https://evil.example/'),
-    });
-    expect(bad.statusCode).toBe(400);
-    const proto = await ctx.app.inject({
-      method: 'GET',
-      url: '/api/v1/auth/blizzard/login?return_to=' + encodeURIComponent('//evil.example/'),
-    });
-    expect(proto.statusCode).toBe(400);
+    const cases = [
+      'https://evil.example/',
+      '//evil.com',
+      '/\\evil.com',
+      '/%09/evil.com',
+      '/%0a/evil.com',
+      '/%0d/evil.com',
+      encodeURIComponent('//evil.com'),
+      '/%5cevil.com',
+    ];
+    for (const value of cases) {
+      const bad = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/blizzard/login?return_to=' + value,
+      });
+      expect(bad.statusCode, `return_to=${value}`).toBe(400);
+    }
+    // Unit: control-char path must not pass isSafeReturnTo / safeWebRedirect
+    expect(isSafeReturnTo('/\t/evil.com')).toBe(false);
+    expect(isSafeReturnTo('/%09/evil.com')).toBe(false);
+    expect(() => safeWebRedirect('https://crusaderstrike.com', '/\t/evil.com')).toThrow();
   });
 
   it('CSRF required on selection; mismatch → 403 csrf_failed', async () => {
@@ -222,7 +238,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     ctx = await startTestApp();
     const { cookie, csrf } = await signIn(ctx);
     ctx.mock.options.failUpstream = true;
-    ctx.app.clearRefreshCooldowns?.();
+    await ctx.app.clearRefreshCooldowns?.();
     const refresh = await ctx.app.inject({
       method: 'POST',
       url: '/api/v1/me/characters/refresh',
@@ -266,5 +282,70 @@ describe('Blizzard OAuth + characters (#11)', () => {
       character_id: id,
       items: [{ itemId: 12345 }],
     });
+  });
+
+  it('rejects unknown profile fields with 400', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const bad = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/profile',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { preferred_region: 'eu', battletag: 'Nope#1' },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json()).toMatchObject({ errors: { body: expect.stringContaining('Unknown') } });
+  });
+
+  it('encrypts Blizzard tokens at rest', async () => {
+    ctx = await startTestApp();
+    await signIn(ctx);
+    const row = await ctx.pool.query<{ access_token: string; refresh_token: string }>(
+      `SELECT access_token, refresh_token FROM users LIMIT 1`,
+    );
+    expect(row.rows[0]!.access_token.startsWith('v1:')).toBe(true);
+    expect(row.rows[0]!.refresh_token.startsWith('v1:')).toBe(true);
+    expect(row.rows[0]!.access_token.includes('access_')).toBe(false);
+  });
+});
+
+describe('config guards', () => {
+  it('BLIZZARD_MOCK defaults to false', () => {
+    const cfg = loadConfig({
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
+      SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
+      TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
+      BLIZZARD_CLIENT_ID: 'id',
+      BLIZZARD_CLIENT_SECRET: 'secret',
+    });
+    expect(cfg.BLIZZARD_MOCK).toBe(false);
+  });
+
+  it('fails when NODE_ENV=production and BLIZZARD_MOCK=true', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
+        SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
+        TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
+        BLIZZARD_MOCK: 'true',
+        BLIZZARD_CLIENT_ID: 'id',
+        BLIZZARD_CLIENT_SECRET: 'secret',
+      }),
+    ).toThrow(/BLIZZARD_MOCK/);
+  });
+
+  it('rejects unknown region in BLIZZARD_REGIONS at startup', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'development',
+        DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
+        SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
+        TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
+        BLIZZARD_MOCK: 'true',
+        BLIZZARD_REGIONS: 'us,cn',
+      }),
+    ).toThrow(/Unsupported Blizzard region/);
   });
 });

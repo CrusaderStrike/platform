@@ -4,14 +4,27 @@ import type {
   BlizzardWowAccountProfile,
   NormalizedCharacter,
 } from './types.js';
+import {
+  apiBaseUrlForRegion,
+  isBlizzardRegion,
+  profileNamespace,
+  type BlizzardRegion,
+} from './regions.js';
 
 export type BlizzardClientConfig = {
   clientId: string;
   clientSecret: string;
-  region: 'us' | 'eu' | 'kr' | 'tw';
+  /** Primary region (OAuth host selection). */
+  region: BlizzardRegion;
+  /** Regions to pull Forever characters from on login/refresh. */
+  regions: BlizzardRegion[];
   authorizeUrl: string;
   tokenUrl: string;
-  apiBaseUrl: string;
+  /**
+   * Optional single API base (tests/mock). When unset, each region uses
+   * https://{region}.api.blizzard.com.
+   */
+  apiBaseUrl?: string;
   redirectUri: string;
 };
 
@@ -23,7 +36,10 @@ export type BlizzardClient = {
   }): string;
   exchangeCode(args: { code: string; codeVerifier: string }): Promise<BlizzardTokenResponse>;
   fetchUserInfo(accessToken: string): Promise<BlizzardUserInfo>;
-  fetchForeverCharacters(accessToken: string, region?: string): Promise<NormalizedCharacter[]>;
+  /** Fetch Forever characters for one region. */
+  fetchForeverCharacters(accessToken: string, region: BlizzardRegion): Promise<NormalizedCharacter[]>;
+  /** Fetch Forever characters across all configured regions and merge. */
+  fetchForeverCharactersAll(accessToken: string): Promise<NormalizedCharacter[]>;
 };
 
 function mapFaction(raw?: string | null): 'alliance' | 'horde' | null {
@@ -39,7 +55,7 @@ function opaqueId(region: string, blizzardId: number): string {
 
 export function normalizeForeverCharacters(
   profile: BlizzardWowAccountProfile,
-  region: 'us' | 'eu',
+  region: BlizzardRegion,
 ): NormalizedCharacter[] {
   const out: NormalizedCharacter[] = [];
   for (const account of profile.wow_accounts ?? []) {
@@ -66,6 +82,8 @@ export function normalizeForeverCharacters(
 }
 
 export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient {
+  const regions = cfg.regions.length ? cfg.regions : [cfg.region];
+
   async function tokenRequest(body: URLSearchParams): Promise<BlizzardTokenResponse> {
     const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString('base64');
     const res = await fetch(cfg.tokenUrl, {
@@ -84,6 +102,35 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
       throw err;
     }
     return (await res.json()) as BlizzardTokenResponse;
+  }
+
+  function apiBaseFor(region: BlizzardRegion): string {
+    if (cfg.apiBaseUrl) return cfg.apiBaseUrl.replace(/\/$/, '');
+    return apiBaseUrlForRegion(region);
+  }
+
+  async function fetchForeverCharacters(
+    accessToken: string,
+    region: BlizzardRegion,
+  ): Promise<NormalizedCharacter[]> {
+    if (!isBlizzardRegion(region)) return [];
+    const ns = profileNamespace(region);
+    const url = `${apiBaseFor(region)}/profile/user/wow?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Battlenet-Namespace': ns,
+      },
+    });
+    if (res.status === 404) return [];
+    if (!res.ok) {
+      const err = new Error(`blizzard_profile_${res.status}`);
+      (err as Error & { status?: number }).status = res.status;
+      throw err;
+    }
+    const body = (await res.json()) as BlizzardWowAccountProfile;
+    return normalizeForeverCharacters(body, region);
   }
 
   return {
@@ -110,10 +157,10 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
     },
 
     async fetchUserInfo(accessToken) {
-      const res = await fetch(`${cfg.apiBaseUrl.replace(/\/$/, '')}/oauth/userinfo`, {
+      const base = apiBaseFor(cfg.region);
+      const res = await fetch(`${base}/oauth/userinfo`, {
         headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
       });
-      // Battle.net also serves userinfo at oauth.battle.net/userinfo
       if (res.status === 404) {
         const alt = await fetch('https://oauth.battle.net/userinfo', {
           headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
@@ -133,28 +180,20 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
       return (await res.json()) as BlizzardUserInfo;
     },
 
-    async fetchForeverCharacters(accessToken, region = cfg.region) {
-      const ns = `profile-forever-${region}`;
-      const url = `${cfg.apiBaseUrl.replace(/\/$/, '')}/profile/user/wow?namespace=${encodeURIComponent(ns)}&locale=en_US`;
-      const res = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'application/json',
-          'Battlenet-Namespace': ns,
-        },
-      });
-      if (res.status === 404) {
-        // Empty Forever roster
-        return [];
+    fetchForeverCharacters,
+
+    async fetchForeverCharactersAll(accessToken) {
+      const all: NormalizedCharacter[] = [];
+      const seen = new Set<string>();
+      for (const region of regions) {
+        const chars = await fetchForeverCharacters(accessToken, region);
+        for (const c of chars) {
+          if (seen.has(c.id)) continue;
+          seen.add(c.id);
+          all.push(c);
+        }
       }
-      if (!res.ok) {
-        const err = new Error(`blizzard_profile_${res.status}`);
-        (err as Error & { status?: number }).status = res.status;
-        throw err;
-      }
-      const body = (await res.json()) as BlizzardWowAccountProfile;
-      const r = region === 'eu' ? 'eu' : 'us';
-      return normalizeForeverCharacters(body, r);
+      return all;
     },
   };
 }

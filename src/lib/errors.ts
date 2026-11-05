@@ -1,3 +1,5 @@
+import { newRequestId } from './crypto.js';
+
 export class AppError extends Error {
   constructor(
     public statusCode: number,
@@ -11,5 +13,5 @@ export class AppError extends Error {
 }
 
 export function requestId(): string {
-  return `req_${Math.random().toString(16).slice(2, 10)}`;
+  return newRequestId();
 }

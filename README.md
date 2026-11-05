@@ -14,7 +14,7 @@ Crusader Strike platform: backend holding every guild's data, serving the websit
 - Fastify
 - Postgres 16 (plain SQL migrations, `node-postgres`)
 - Vitest + embedded Postgres for tests
-- Blizzard OAuth with PKCE; `BLIZZARD_MOCK=true` until #10 lands a real client
+- Blizzard OAuth with PKCE; `BLIZZARD_MOCK` defaults to false (dev mock opt-in). Multi-region via `BLIZZARD_REGIONS` (us,eu,kr,tw); Forever namespace `profile-forever-{region}`
 
 This repository's application scaffold lands with platform#11 so auth can ship. Architecture choice in #13 can still reshape the guild/event-sourcing layers.
 
