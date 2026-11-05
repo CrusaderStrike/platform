@@ -11,14 +11,17 @@ async function clearCooldown(ctx: TestCtx) {
 
 async function selectMain(ctx: TestCtx, cookie: string, csrf: string) {
   const list = await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } });
-  const body = list.json() as { characters: { id: string }[]; selection: { main_id: string } | null };
+  const body = list.json() as {
+    characters: { id: string; displayed: boolean }[];
+    selection: { displayed_character_ids: string[] } | null;
+  };
   const chosen = body.characters[0]!;
-  if (!body.selection || body.selection.main_id !== chosen.id) {
+  if (!chosen.displayed) {
     const sel = await ctx.app.inject({
-      method: 'PUT',
-      url: '/api/v1/me/characters/selection',
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${chosen.id}`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { main_id: chosen.id, alt_ids: [] },
+      payload: { displayed: true },
     });
     expect(sel.statusCode).toBe(200);
   }

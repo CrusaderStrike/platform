@@ -144,7 +144,7 @@ paths:
     get:
       tags: [auth]
       operationId: listMyCharacters
-      summary: The signed-in user's WoW Forever characters and main/alt selection
+      summary: The signed-in user's WoW Forever characters and display set
       description: |
         Fetched from the Battle.net profile API using the **WoW Forever** profile namespace
         `profile-forever-{region}` (for example `profile-forever-us`). Characters from any other game version are never
@@ -159,14 +159,62 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '500': { $ref: '#/components/responses/InternalError' }
         '502': { $ref: '#/components/responses/UpstreamUnavailable' }
+  /me/characters/{character_id}:
+    patch:
+      tags: [auth]
+      operationId: patchMyCharacter
+      summary: Toggle whether a character is displayed on the profile (primary)
+      description: |
+        Primary UI path for the display set. Body `{ displayed: boolean }`. CSRF + session + owner-only.
+        New characters default to `displayed: false`. Hiding a character keeps its gear sets; character-scoped
+        list/create while hidden returns **409** `character_not_displayed`.
+        Rate-limited with the gear write bucket. Does not bump `characters.updated_at`.
+      parameters:
+        - name: character_id
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayed]
+              additionalProperties: false
+              properties:
+                displayed: { type: boolean }
+      responses:
+        '200':
+          description: Updated character and current selection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [character, selection]
+                properties:
+                  character: { $ref: '#/components/schemas/Character' }
+                  selection: { $ref: '#/components/schemas/CharacterSelection' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /me/characters/selection:
     put:
       tags: [auth]
       operationId: setMyCharacterSelection
-      summary: Set main and alts (full replace, idempotent)
+      summary: Replace display set (optional bulk)
       description: |
-        `main_id` is required and must be one of the user's WoW Forever characters. `alt_ids` must also be the user's
-        characters, must not include `main_id`, has no duplicates and may be empty. `Member.is_main` is derived from this selection.
+        Optional full replace of displayed characters. Preferred body `{ displayed_character_ids: string[] }`
+        (empty array clears the set). Also accepts legacy `{ main_id, alt_ids }` for one release
+        (mapped to the display set). Every id must be an owned non-stale WoW Forever character;
+        unknown / not-owned / non-Forever → **400** `validation_error` with
+        `displayed_character_ids: unknown_character` (or `main_id` for legacy). Prefer
+        `PATCH /me/characters/{id}` for single toggles. CSRF + session.
+        Response always includes compat `main_id` / `alt_ids` derived from the display set.
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -196,9 +244,9 @@ paths:
       operationId: getMyProfile
       summary: Signed-in user profile
       description: |
-        Returns the Battle.net profile for the session: battletag, preferred region, the current
-        main character id (null until the user picks one via `PUT /me/characters/selection`), and
-        timestamps. Character roster details live on `GET /me/characters`.
+        Returns the Battle.net profile for the session: battletag, preferred region,
+        `main_character_id` (compat — first displayed character or null), and timestamps.
+        Character roster and display set live on `GET /me/characters`.
       responses:
         '200':
           description: Profile.
@@ -211,8 +259,9 @@ paths:
       operationId: updateMyProfile
       summary: Update profile fields (not character selection)
       description: |
-        Partial update of non-character profile fields. Character main/alt selection stays on
-        `PUT /me/characters/selection`. Empty body is a no-op that returns the current profile.
+        Partial update of non-character profile fields. Character display set stays on
+        `PATCH /me/characters/{id}` or `PUT /me/characters/selection`. Empty body is a no-op
+        that returns the current profile.
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -238,12 +287,12 @@ paths:
       description: |
         CSRF-protected. Re-fetches the Battle.net profile with namespace `profile-forever-{region}`
         using the stored user token, upserts Forever characters, and marks missing ones stale
-        (never hard-deletes). If the current main goes stale, `selection.main_id` is cleared.
-        Returns **200** with the same body as `GET /me/characters`.
-        Blizzard failures return **502** `upstream_unavailable`.
+        (never hard-deletes). Stale characters are cleared from the display set (`displayed=false`).
+        New characters default to `displayed: false`. Returns **200** with the same body as
+        `GET /me/characters`. Blizzard failures return **502** `upstream_unavailable`.
         At most one successful or attempted refresh per user per **60 seconds**; a faster call
         returns **429** with `Retry-After` (seconds until the window opens).
-        Character main/alt selection remains `PUT /me/characters/selection` (no `/me/main`).
+        Display set: `PATCH /me/characters/{id}` (primary) or `PUT /me/characters/selection`.
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       responses:
         '200':
@@ -766,8 +815,8 @@ paths:
         Lists are **per character** (platform#17). Returns at most 20 active lists.
         Owner sees private + guild-shared lists they own; other guild members only see
         lists with `visibility=guild` for characters they can access via guild context.
-        Caller must own the character and have it selected; unknown → **404**, owned but
-        not selected → **409** `character_not_displayed`.
+        Caller must own the character and have it in their display set; unknown character
+        → **404**, owned but not displayed → **409** `character_not_displayed`.
       parameters:
         - name: character_id
           in: path
@@ -815,8 +864,8 @@ paths:
         Max **20** active lists per character. A 21st create returns **409** `list_limit_reached`.
         Default `visibility` is `private`. Emits `GearListCreated` (seq=1); optional create `slots`
         also emit `GearSlotSet` per non-null slot.
-        Ownership is checked before the display/selection gate (unknown character → **404**;
-        owned but not selected → **409** `character_not_displayed`).
+        Character must be owned and displayed → else **404** / **409** `character_not_displayed`
+        (ownership is checked first).
         Slot/item validation on create `slots` uses **400** `validation_error` field details
         (`slot: invalid_slot`, `item_id: item_not_in_slot` / `item_not_forever`). Invalid slots
         are checked before the cap, so a 21st create with a bad slot returns **400** rather than
@@ -1911,39 +1960,72 @@ components:
         stale:
           type: boolean
           description: True when the character was missing from the latest Battle.net refresh. Never hard-deleted.
+        displayed:
+          type: boolean
+          description: True when the character is in the user's profile display set. Defaults to false for new characters.
     CharacterSelectionInput:
-      type: object
-      required: [main_id, alt_ids]
-      properties:
-        main_id: { type: string }
-        alt_ids: { type: array, uniqueItems: true, maxItems: 50, items: { type: string } }
-    CharacterSelection:
-      allOf:
-        - { $ref: '#/components/schemas/CharacterSelectionInput' }
+      oneOf:
         - type: object
-          required: [updated_at]
+          required: [displayed_character_ids]
+          additionalProperties: false
           properties:
-            updated_at: { type: string, format: date-time }
+            displayed_character_ids:
+              type: array
+              uniqueItems: true
+              maxItems: 50
+              items: { type: string }
+              description: Full replace of the display set. Empty array clears it.
+        - type: object
+          description: Legacy body accepted for one release (live web until web#43). Mapped to displayed_character_ids as [main_id, ...alt_ids].
+          properties:
+            main_id:
+              oneOf:
+                - { type: string }
+                - { type: 'null' }
+            alt_ids:
+              type: array
+              items: { type: string }
+          additionalProperties: false
+    CharacterSelection:
+      type: object
+      required: [displayed_character_ids, main_id, alt_ids, updated_at]
+      properties:
+        displayed_character_ids:
+          type: array
+          items: { type: string }
+        main_id:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+          description: Compat — first displayed id (or null). Remove after web#43.
+        alt_ids:
+          type: array
+          items: { type: string }
+          description: Compat — remaining displayed ids. Remove after web#43.
+        updated_at:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: 'null' }
+          description: From character_selections.updated_at; null when the display set is empty.
     CharacterList:
       type: object
       required: [game, characters, selection]
       properties:
         game: { const: wow_forever }
         characters: { type: array, items: { $ref: '#/components/schemas/Character' } }
-        selection:
-          oneOf:
-            - { $ref: '#/components/schemas/CharacterSelection' }
-            - { type: 'null' }
+        selection: { $ref: '#/components/schemas/CharacterSelection' }
 
     UserProfile:
       type: object
-      required: [battletag, main_character_id, preferred_region, created_at, updated_at]
+      required: [battletag, preferred_region, main_character_id, created_at, updated_at]
       properties:
         battletag: { type: string }
-        main_character_id:
-          type: [string, 'null']
-          description: Same as CharacterSelection.main_id; null until the user picks a main.
         preferred_region: { $ref: '#/components/schemas/Region' }
+        main_character_id:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+          description: Compat — first displayed character id (or null). Remove after web#43.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     UserProfileUpdate:

@@ -6,6 +6,7 @@ import { decryptSecret, TokenDecryptError } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
 import { isBlizzardRegion } from '../blizzard/regions.js';
 import * as store from '../auth/store.js';
+import * as gear from '../gear/store.js';
 import { clearSessionCookie, requireCsrf, requireSession } from '../auth/session.js';
 
 const REFRESH_COOLDOWN_MS = 60_000;
@@ -16,10 +17,7 @@ export type ProfileDeps = {
   blizzard: BlizzardClient;
 };
 
-function characterListBody(
-  chars: store.CharacterRow[],
-  selection: store.SelectionRow | null,
-) {
+function characterListBody(chars: store.CharacterRow[], selection: store.SelectionRow) {
   return {
     game: 'wow_forever' as const,
     characters: chars.map(store.characterToApi),
@@ -27,7 +25,94 @@ function characterListBody(
   };
 }
 
+function profileBody(user: store.UserRow, selection: store.SelectionRow) {
+  return {
+    battletag: user.battletag,
+    preferred_region: user.preferred_region,
+    // Compat: persisted main while displayed, else first displayed, else null.
+    main_character_id: selection.main_id,
+    created_at: user.created_at.toISOString(),
+    updated_at: user.updated_at.toISOString(),
+  };
+}
+
 const PROFILE_UPDATE_KEYS = new Set(['preferred_region']);
+
+type ParsedSelection = {
+  ids: string[];
+  /** Explicit main for legacy body; first id for the new shape. */
+  mainId: string | null;
+  shape: 'displayed' | 'legacy';
+};
+
+/** Parse new `{displayed_character_ids}` or legacy `{main_id, alt_ids}` (order preserved). */
+function parseDisplayedIds(body: Record<string, unknown>): ParsedSelection {
+  if (Array.isArray(body.displayed_character_ids)) {
+    const rawIds = body.displayed_character_ids;
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const id of rawIds) {
+      if (typeof id !== 'string' || !id) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          displayed_character_ids: 'unknown_character',
+        });
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return { ids, mainId: ids[0] ?? null, shape: 'displayed' };
+  }
+
+  // Legacy body used by live crusaderstrike.com until web#43.
+  if ('main_id' in body || 'alt_ids' in body) {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    let mainId: string | null = null;
+    const main = body.main_id;
+    if (main !== undefined && main !== null) {
+      if (typeof main !== 'string' || !main) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          main_id: 'Must be a character id or null.',
+        });
+      }
+      mainId = main;
+      seen.add(main);
+      ids.push(main);
+    }
+    const alts = body.alt_ids;
+    if (alts !== undefined) {
+      if (!Array.isArray(alts)) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          alt_ids: 'Must be an array of character ids.',
+        });
+      }
+      for (const id of alts) {
+        if (typeof id !== 'string' || !id) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            alt_ids: 'unknown_character',
+          });
+        }
+        if (seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    return { ids, mainId, shape: 'legacy' };
+  }
+
+  throw new AppError(400, 'validation_error', 'Invalid selection.', {
+    displayed_character_ids: 'Must be an array of character ids.',
+  });
+}
+
+async function requireGearWriteRate(pool: Pool, userId: string, reply: { header: (k: string, v: string) => unknown }) {
+  const rate = await gear.consumeGearWrite(pool, userId);
+  if (!rate.ok) {
+    reply.header('Retry-After', String(rate.retryAfterSec));
+    throw new AppError(429, 'rate_limited', 'Too many writes. Try again shortly.');
+  }
+}
 
 export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileDeps): Promise<void> {
   const { pool, config, blizzard } = deps;
@@ -37,13 +122,7 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     const user = await store.getUser(pool, s.userId);
     if (!user) throw new AppError(401, 'unauthenticated', 'Sign in required.');
     const selection = await store.getSelection(pool, s.userId);
-    return {
-      battletag: user.battletag,
-      main_character_id: selection?.main_id ?? null,
-      preferred_region: user.preferred_region,
-      created_at: user.created_at.toISOString(),
-      updated_at: user.updated_at.toISOString(),
-    };
+    return profileBody(user, selection);
   });
 
   app.put('/api/v1/me/profile', async (req) => {
@@ -72,13 +151,7 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     const user = await store.getUser(pool, s.userId);
     if (!user) throw new AppError(401, 'unauthenticated', 'Sign in required.');
     const selection = await store.getSelection(pool, s.userId);
-    return {
-      battletag: user.battletag,
-      main_character_id: selection?.main_id ?? null,
-      preferred_region: user.preferred_region,
-      created_at: user.created_at.toISOString(),
-      updated_at: user.updated_at.toISOString(),
-    };
+    return profileBody(user, selection);
   });
 
   app.get('/api/v1/me/characters', async (req) => {
@@ -86,6 +159,45 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     const chars = await store.listCharacters(pool, s.userId);
     const selection = await store.getSelection(pool, s.userId);
     return characterListBody(chars, selection);
+  });
+
+  app.patch('/api/v1/me/characters/:characterId', async (req, reply) => {
+    requireCsrf(req);
+    const s = requireSession(req);
+    await requireGearWriteRate(pool, s.userId, reply);
+    const { characterId } = req.params as { characterId: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      throw new AppError(400, 'validation_error', 'Invalid character update.', {
+        body: 'Expected a JSON object.',
+      });
+    }
+    const keys = Object.keys(body);
+    if (keys.length !== 1 || !('displayed' in body)) {
+      throw new AppError(400, 'validation_error', 'Invalid character update.', {
+        body: 'Expected { displayed: boolean }.',
+      });
+    }
+    if (typeof body.displayed !== 'boolean') {
+      throw new AppError(400, 'validation_error', 'Invalid character update.', {
+        displayed: 'Must be a boolean.',
+      });
+    }
+    const existing = await store.getCharacterForUser(pool, s.userId, characterId);
+    if (!existing || existing.stale || existing.game !== 'wow_forever') {
+      throw new AppError(404, 'not_found', 'Character not found.');
+    }
+    const updated = await store.setCharacterDisplayed(pool, {
+      userId: s.userId,
+      characterId,
+      displayed: body.displayed,
+    });
+    if (!updated) throw new AppError(404, 'not_found', 'Character not found.');
+    const selection = await store.getSelection(pool, s.userId);
+    return {
+      character: store.characterToApi(updated),
+      selection: store.selectionToApi(selection),
+    };
   });
 
   app.post('/api/v1/me/characters/refresh', async (req, reply) => {
@@ -137,38 +249,46 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
   app.put('/api/v1/me/characters/selection', async (req) => {
     requireCsrf(req);
     const s = requireSession(req);
-    const body = req.body as { main_id?: string; alt_ids?: string[] };
-    if (!body || typeof body.main_id !== 'string') {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
       throw new AppError(400, 'validation_error', 'Invalid selection.', {
-        main_id: 'Pick a main from your characters.',
+        body: 'Expected a JSON object.',
       });
     }
-    const altIds = Array.isArray(body.alt_ids) ? body.alt_ids : null;
-    if (!altIds) {
-      throw new AppError(400, 'validation_error', 'Invalid selection.', {
-        alt_ids: 'alt_ids must be an array.',
-      });
-    }
+    const parsed = parseDisplayedIds(body);
     const chars = await store.listCharacters(pool, s.userId);
-    const live = new Set(chars.filter((c) => !c.stale).map((c) => c.id));
-    if (!live.has(body.main_id)) {
-      throw new AppError(400, 'validation_error', 'Invalid selection.', {
-        main_id: 'Pick a main from your characters.',
-      });
-    }
-    const seen = new Set<string>();
-    for (const id of altIds) {
-      if (typeof id !== 'string' || !live.has(id) || id === body.main_id || seen.has(id)) {
+    const live = new Map(
+      chars
+        .filter((c) => !c.stale && c.game === 'wow_forever')
+        .map((c) => [c.id, c] as const),
+    );
+    if (parsed.shape === 'legacy') {
+      if (parsed.mainId && !live.has(parsed.mainId)) {
         throw new AppError(400, 'validation_error', 'Invalid selection.', {
-          alt_ids: 'Alts must be your other characters.',
+          main_id: 'unknown_character',
         });
       }
-      seen.add(id);
+      for (const id of parsed.ids) {
+        if (id === parsed.mainId) continue;
+        if (!live.has(id)) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            alt_ids: 'unknown_character',
+          });
+        }
+      }
+    } else {
+      for (const id of parsed.ids) {
+        if (!live.has(id)) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            displayed_character_ids: 'unknown_character',
+          });
+        }
+      }
     }
     const selection = await store.setSelection(pool, {
       userId: s.userId,
-      mainId: body.main_id,
-      altIds,
+      displayedCharacterIds: parsed.ids,
+      mainId: parsed.mainId,
     });
     return { selection: store.selectionToApi(selection) };
   });

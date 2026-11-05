@@ -59,11 +59,10 @@ function requireCharacterId(id: string): void {
 }
 
 /**
- * Until display-set (#41) lands, main/alt selection is the display gate.
- * Hidden / unselected characters → 409 character_not_displayed (contract §2.2).
+ * Display set (#41): hidden / unselected characters → 409 character_not_displayed.
  */
 function requireDisplayedCharacter(
-  selection: { main_id: string; alt_ids: string[] } | null,
+  selection: { displayed_character_ids: string[] } | null,
   characterId: string,
 ): void {
   const selected = gear.selectedCharacterIds(selection);
@@ -559,6 +558,7 @@ export async function registerGearListRoutes(
       if (!gear.canWriteList(list, s.userId)) {
         throw new AppError(404, 'not_found', 'List not found.');
       }
+      // Ownership of the list's character before display-set gate.
       const owned = await authStore.getCharacterForUser(client, s.userId, list.character_id);
       if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
       const selection = await authStore.getSelection(client, s.userId);
@@ -639,7 +639,7 @@ export async function registerGearListRoutes(
       if (!gear.canWriteList(list, s.userId)) {
         throw new AppError(403, 'forbidden', 'Only the list owner can edit.');
       }
-      // Re-check character still in main/alt selection at write time.
+      // Re-check character still in display set at write time.
       const selection = await authStore.getSelection(pool, s.userId);
       requireDisplayedCharacter(selection, list.character_id);
 

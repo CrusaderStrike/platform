@@ -12,18 +12,18 @@ async function pickSelectedCharacter(ctx: TestCtx, cookie: string, csrf: string)
   const chars = (
     await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
   ).json() as {
-    characters: Array<{ id: string; character_name: string; realm: string | null }>;
-    selection: { main_id: string } | null;
+    characters: Array<{ id: string; character_name: string; realm: string | null; displayed: boolean }>;
+    selection: { displayed_character_ids: string[] } | null;
   };
   const light = chars.characters.find((c) => c.character_name === 'Lightbringer' && c.realm);
   const chosen = light ?? chars.characters.find((c) => c.realm) ?? chars.characters[0]!;
   if (!chosen.realm) throw new Error('need a character with realm for upload tests');
-  if (!chars.selection || chars.selection.main_id !== chosen.id) {
+  if (!chosen.displayed) {
     await ctx.app.inject({
-      method: 'PUT',
-      url: '/api/v1/me/characters/selection',
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${chosen.id}`,
       headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
-      payload: { main_id: chosen.id, alt_ids: [] },
+      payload: { displayed: true },
     });
   }
   return { id: chosen.id, character_name: chosen.character_name, realm: chosen.realm };

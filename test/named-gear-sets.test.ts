@@ -9,16 +9,16 @@ async function clearCooldown(ctx: TestCtx) {
 async function selectMain(ctx: TestCtx, cookie: string, csrf: string) {
   const list = await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } });
   const body = list.json() as {
-    characters: { id: string; level: number | null }[];
-    selection: { main_id: string } | null;
+    characters: { id: string; level: number | null; displayed: boolean }[];
+    selection: { displayed_character_ids: string[] } | null;
   };
   const chosen = body.characters[0]!;
-  if (!body.selection || body.selection.main_id !== chosen.id) {
+  if (!chosen.displayed) {
     const sel = await ctx.app.inject({
-      method: 'PUT',
-      url: '/api/v1/me/characters/selection',
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${chosen.id}`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { main_id: chosen.id, alt_ids: [] },
+      payload: { displayed: true },
     });
     expect(sel.statusCode).toBe(200);
   }
@@ -277,9 +277,11 @@ describe('named gear sets (platform#40)', () => {
     expect(createMissing.statusCode).toBe(400);
     expect(createMissing.json()).toMatchObject({ errors: { item_id: 'item_not_forever' } });
 
-    // Non-selected character → 409 on create
+    // Non-displayed character → 409 on create
     const chars = await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } });
-    const other = (chars.json() as { characters: { id: string }[] }).characters.find((c) => c.id !== chosen.id);
+    const other = (chars.json() as { characters: { id: string; displayed: boolean }[] }).characters.find(
+      (c) => c.id !== chosen.id && !c.displayed,
+    );
     if (other) {
       await clearCooldown(ctx);
       const hidden = await ctx.app.inject({
