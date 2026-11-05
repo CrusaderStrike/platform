@@ -38,15 +38,17 @@ tags:
   - name: signups
     description: Public waitlist signups with double opt-in.
   - name: auth
-    description: Blizzard OAuth placeholder (platform#11).
+    description: Blizzard OAuth, session, profile and character selection (platform#11).
   - name: guilds
     description: Guild profile.
   - name: runs
     description: Addon run uploads and reads.
   - name: gear
-    description: Event-sourced gear lists.
+    description: Event-sourced gear wishlists (platform#17) and per-character equipped gear (slice 1).
   - name: sync
     description: Addon companion sync (web to addon).
+  - name: profile
+    description: Signed-in user profile and character roster (platform#11).
 paths:
   /signups:
     post:
@@ -232,6 +234,121 @@ paths:
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '502': { $ref: '#/components/responses/UpstreamUnavailable' }
+
+  /me/profile:
+    get:
+      tags: [profile]
+      operationId: getMyProfile
+      summary: Signed-in user profile
+      description: |
+        Returns the Battle.net profile for the session: battletag, preferred region, the current
+        main character id (null until the user picks one via `PUT /me/characters/selection`), and
+        timestamps. Character roster details live on `GET /me/characters`.
+      responses:
+        '200':
+          description: Profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [profile]
+      operationId: updateMyProfile
+      summary: Update profile fields (not character selection)
+      description: |
+        Partial update of non-character profile fields. Character main/alt selection stays on
+        `PUT /me/characters/selection`. Empty body is a no-op that returns the current profile.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserProfileUpdate' }
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /me/characters/refresh:
+    post:
+      tags: [profile]
+      operationId: refreshMyCharacters
+      summary: Re-pull WoW Forever characters from Battle.net
+      description: |
+        Calls the Blizzard profile API with namespace `profile-forever-{region}` using the stored
+        user token, upserts Forever characters, and marks missing ones stale (never hard-deletes).
+        If the current main goes stale, selection.main_id is cleared. Rate-limited per user.
+        Returns the same shape as `GET /me/characters`.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      responses:
+        '200':
+          description: Refreshed character list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CharacterList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { $ref: '#/components/responses/UpstreamUnavailable' }
+  /characters/{character_id}/gear:
+    get:
+      tags: [gear]
+      operationId: getCharacterGear
+      summary: Equipped gear for a character owned by the session
+      description: |
+        Per-character **equipped** gear (what the character is wearing), distinct from event-sourced
+        gear *wishlists* under `/gear-lists` (platform#17). The caller must own the character.
+        Items use snake_case field names. Empty slots are omitted.
+      parameters:
+        - name: character_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Equipped gear.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CharacterGear' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [gear]
+      operationId: putCharacterGear
+      summary: Replace equipped gear for an owned character (full replace)
+      description: |
+        Full replace of the equipped set. At most one item per slot. Unknown slots or duplicate
+        slots return 400. Ownership is required (403 otherwise). Wishlist edits stay on `/gear-lists`.
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+        - name: character_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CharacterGearInput' }
+      responses:
+        '200':
+          description: Saved equipped gear.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CharacterGear' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /guild:
     get:
       tags: [guilds]
@@ -1054,6 +1171,9 @@ components:
         race: { type: string }
         level: { type: integer }
         game: { const: wow_forever }
+        stale:
+          type: boolean
+          description: True when the character was missing from the latest Battle.net refresh. Never hard-deleted.
     CharacterSelectionInput:
       type: object
       required: [main_id, alt_ids]
@@ -1077,6 +1197,56 @@ components:
           oneOf:
             - { $ref: '#/components/schemas/CharacterSelection' }
             - { type: 'null' }
+
+    UserProfile:
+      type: object
+      required: [battletag, main_character_id, preferred_region, created_at, updated_at]
+      properties:
+        battletag: { type: string }
+        main_character_id:
+          type: [string, 'null']
+          description: Same as CharacterSelection.main_id; null until the user picks a main.
+        preferred_region: { $ref: '#/components/schemas/Region' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserProfileUpdate:
+      type: object
+      minProperties: 0
+      additionalProperties: false
+      properties:
+        preferred_region: { $ref: '#/components/schemas/Region' }
+    EquippedItem:
+      type: object
+      description: |
+        One equipped item on a character. Field names are snake_case (`item_id`, `ilvl`).
+        Distinct from wishlist `GearItem` (which carries priority/obtained).
+      required: [slot, item_id]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer, minimum: 1 }
+        name: { type: [string, 'null'], maxLength: 128 }
+        quality:
+          type: [string, 'null']
+          enum: [poor, common, uncommon, rare, epic, legendary, null]
+        ilvl: { type: [integer, 'null'], minimum: 1 }
+        icon: { type: [string, 'null'], maxLength: 128, description: "Blizzard icon asset name without file extension." }
+    CharacterGearInput:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 19
+          items: { $ref: '#/components/schemas/EquippedItem' }
+    CharacterGear:
+      allOf:
+        - { $ref: '#/components/schemas/CharacterGearInput' }
+        - type: object
+          required: [character_id, updated_at]
+          properties:
+            character_id: { type: string }
+            updated_at: { type: string, format: date-time }
+
     RankingEntry:
       type: object
       properties:
