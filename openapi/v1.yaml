@@ -168,6 +168,7 @@ paths:
         Primary UI path for the display set. Body `{ displayed: boolean }`. CSRF + session + owner-only.
         New characters default to `displayed: false`. Hiding a character keeps its gear sets; character-scoped
         list/create while hidden returns **409** `character_not_displayed`.
+        Rate-limited with the gear write bucket. Does not bump `characters.updated_at`.
       parameters:
         - name: character_id
           in: path
@@ -186,30 +187,34 @@ paths:
                 displayed: { type: boolean }
       responses:
         '200':
-          description: Updated character.
+          description: Updated character and current selection.
           content:
             application/json:
               schema:
                 type: object
-                required: [character]
+                required: [character, selection]
                 properties:
                   character: { $ref: '#/components/schemas/Character' }
+                  selection: { $ref: '#/components/schemas/CharacterSelection' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /me/characters/selection:
     put:
       tags: [auth]
       operationId: setMyCharacterSelection
       summary: Replace display set (optional bulk)
       description: |
-        Optional full replace of displayed characters. Body `{ displayed_character_ids: string[] }`
-        (empty array clears the set). Every id must be an owned non-stale WoW Forever character;
+        Optional full replace of displayed characters. Preferred body `{ displayed_character_ids: string[] }`
+        (empty array clears the set). Also accepts legacy `{ main_id, alt_ids }` for one release
+        (mapped to the display set). Every id must be an owned non-stale WoW Forever character;
         unknown / not-owned / non-Forever → **400** `validation_error` with
-        `displayed_character_ids: unknown_character`. Prefer `PATCH /me/characters/{id}` for single toggles.
-        CSRF + session.
+        `displayed_character_ids: unknown_character` (or `main_id` for legacy). Prefer
+        `PATCH /me/characters/{id}` for single toggles. CSRF + session.
+        Response always includes compat `main_id` / `alt_ids` derived from the display set.
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -239,8 +244,9 @@ paths:
       operationId: getMyProfile
       summary: Signed-in user profile
       description: |
-        Returns the Battle.net profile for the session: battletag, preferred region, and
-        timestamps. Character roster and display set live on `GET /me/characters`.
+        Returns the Battle.net profile for the session: battletag, preferred region,
+        `main_character_id` (compat — first displayed character or null), and timestamps.
+        Character roster and display set live on `GET /me/characters`.
       responses:
         '200':
           description: Profile.
@@ -1958,39 +1964,64 @@ components:
           type: boolean
           description: True when the character is in the user's profile display set. Defaults to false for new characters.
     CharacterSelectionInput:
+      oneOf:
+        - type: object
+          required: [displayed_character_ids]
+          additionalProperties: false
+          properties:
+            displayed_character_ids:
+              type: array
+              uniqueItems: true
+              maxItems: 50
+              items: { type: string }
+              description: Full replace of the display set. Empty array clears it.
+        - type: object
+          description: Legacy body accepted for one release (live web until web#43). Mapped to displayed_character_ids as [main_id, ...alt_ids].
+          properties:
+            main_id:
+              oneOf:
+                - { type: string }
+                - { type: 'null' }
+            alt_ids:
+              type: array
+              items: { type: string }
+          additionalProperties: false
+    CharacterSelection:
       type: object
-      required: [displayed_character_ids]
+      required: [displayed_character_ids, main_id, alt_ids, updated_at]
       properties:
         displayed_character_ids:
           type: array
-          uniqueItems: true
-          maxItems: 50
           items: { type: string }
-          description: Full replace of the display set. Empty array clears it.
-    CharacterSelection:
-      allOf:
-        - { $ref: '#/components/schemas/CharacterSelectionInput' }
-        - type: object
-          required: [updated_at]
-          properties:
-            updated_at: { type: string, format: date-time }
+        main_id:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+          description: Compat — first displayed id (or null). Remove after web#43.
+        alt_ids:
+          type: array
+          items: { type: string }
+          description: Compat — remaining displayed ids. Remove after web#43.
+        updated_at: { type: string, format: date-time }
     CharacterList:
       type: object
       required: [game, characters, selection]
       properties:
         game: { const: wow_forever }
         characters: { type: array, items: { $ref: '#/components/schemas/Character' } }
-        selection:
-          oneOf:
-            - { $ref: '#/components/schemas/CharacterSelection' }
-            - { type: 'null' }
+        selection: { $ref: '#/components/schemas/CharacterSelection' }
 
     UserProfile:
       type: object
-      required: [battletag, preferred_region, created_at, updated_at]
+      required: [battletag, preferred_region, main_character_id, created_at, updated_at]
       properties:
         battletag: { type: string }
         preferred_region: { $ref: '#/components/schemas/Region' }
+        main_character_id:
+          oneOf:
+            - { type: string }
+            - { type: 'null' }
+          description: Compat — first displayed character id (or null). Remove after web#43.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     UserProfileUpdate:

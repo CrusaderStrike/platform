@@ -56,10 +56,12 @@ describe('Blizzard OAuth + characters (#11)', () => {
     const list = chars.json() as {
       game: string;
       characters: Array<{ id: string; game: string; character_name: string; region: string }>;
-      selection: null;
+      selection: { displayed_character_ids: string[]; main_id: string | null; alt_ids: string[] };
     };
     expect(list.game).toBe('wow_forever');
-    expect(list.selection).toBeNull();
+    expect(list.selection).toEqual(
+      expect.objectContaining({ displayed_character_ids: [], main_id: null, alt_ids: [] }),
+    );
     expect(list.characters.every((c) => c.game === 'wow_forever')).toBe(true);
     expect(list.characters.map((c) => c.character_name)).toEqual(
       expect.arrayContaining(['Lightbringer', 'Ashenvow', 'Thornquill', 'Grimlantern', 'Stormcaller']),
@@ -80,7 +82,14 @@ describe('Blizzard OAuth + characters (#11)', () => {
       payload: { displayed: true },
     });
     expect(patch.statusCode).toBe(200);
-    expect(patch.json()).toMatchObject({ character: { id: main.id, displayed: true } });
+    expect(patch.json()).toMatchObject({
+      character: { id: main.id, displayed: true },
+      selection: {
+        displayed_character_ids: [main.id],
+        main_id: main.id,
+        alt_ids: [],
+      },
+    });
 
     const save = await ctx.app.inject({
       method: 'PUT',
@@ -90,7 +99,11 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(save.statusCode).toBe(200);
     expect(save.json()).toMatchObject({
-      selection: { displayed_character_ids: expect.arrayContaining([main.id, alt.id]) },
+      selection: {
+        displayed_character_ids: expect.arrayContaining([main.id, alt.id]),
+        main_id: main.id,
+        alt_ids: [alt.id],
+      },
     });
 
     const listed = await ctx.app.inject({
@@ -114,8 +127,10 @@ describe('Blizzard OAuth + characters (#11)', () => {
       headers: { cookie },
     });
     expect(profile.statusCode).toBe(200);
-    expect(profile.json()).toMatchObject({ battletag: 'Crusader#1234' });
-    expect(profile.json()).not.toHaveProperty('main_character_id');
+    expect(profile.json()).toMatchObject({
+      battletag: 'Crusader#1234',
+      main_character_id: main.id,
+    });
 
     const logout = await ctx.app.inject({
       method: 'DELETE',
@@ -258,6 +273,180 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(ok.json()).toMatchObject({
       selection: { displayed_character_ids: expect.arrayContaining([a!.id, b!.id]) },
     });
+  });
+
+
+  it('PATCH character displayed: auth, CSRF, ownership, stale, body, isolation', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const listed = (
+      await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
+    ).json() as {
+      characters: Array<{ id: string; character_name: string; displayed: boolean }>;
+    };
+    const a = listed.characters.find((c) => c.character_name === 'Lightbringer')!;
+    const b = listed.characters.find((c) => c.character_name === 'Thornquill')!;
+    const c = listed.characters.find((c) => c.character_name === 'Ashenvow')!;
+
+    // Seed two displayed so we can check isolation.
+    for (const id of [a.id, b.id]) {
+      const r = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/me/characters/${id}`,
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload: { displayed: true },
+      });
+      expect(r.statusCode).toBe(200);
+    }
+
+    const noSession = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${a.id}`,
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: false },
+    });
+    expect(noSession.statusCode).toBe(401);
+
+    const noCsrf = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${a.id}`,
+      headers: { cookie, 'content-type': 'application/json' },
+      payload: { displayed: false },
+    });
+    expect(noCsrf.statusCode).toBe(403);
+    expect(noCsrf.json()).toMatchObject({ error: { code: 'csrf_failed' } });
+
+    const badCsrf = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${a.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': 'nope' },
+      payload: { displayed: false },
+    });
+    expect(badCsrf.statusCode).toBe(403);
+
+    const unknown = await ctx.app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me/characters/ch_us_does_not_exist',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: true },
+    });
+    expect(unknown.statusCode).toBe(404);
+
+    // Another user's character → 404
+    const otherUser = await ctx.pool.query<{ id: string }>(
+      `INSERT INTO users (battlenet_id, battletag) VALUES ('bn-other', 'Other#1') RETURNING id`,
+    );
+    const otherChar = await ctx.pool.query<{ id: string }>(
+      `INSERT INTO characters (id, user_id, character_name, region, game, stale, displayed)
+       VALUES ('ch_us_other_char', $1, 'OtherChar', 'us', 'wow_forever', false, false)
+       RETURNING id`,
+      [otherUser.rows[0]!.id],
+    );
+    const otherPatch = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${otherChar.rows[0]!.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: true },
+    });
+    expect(otherPatch.statusCode).toBe(404);
+
+    // Stale character → 404
+    await ctx.pool.query(`UPDATE characters SET stale = true WHERE id = $1`, [c.id]);
+    const stalePatch = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${c.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: true },
+    });
+    expect(stalePatch.statusCode).toBe(404);
+
+    for (const payload of [{}, { displayed: true, extra: 1 }, { displayed: 'yes' }, { shown: true }]) {
+      const badBody = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/me/characters/${a.id}`,
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload,
+      });
+      expect(badBody.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(badBody.json()).toMatchObject({ errors: expect.any(Object) });
+    }
+
+    // Capture updated_at before toggle; must not bump on display change.
+    const before = await ctx.pool.query<{ updated_at: Date; displayed: boolean }>(
+      `SELECT updated_at, displayed FROM characters WHERE id = $1`,
+      [a.id],
+    );
+    expect(before.rows[0]!.displayed).toBe(true);
+
+    const hideA = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${a.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: false },
+    });
+    expect(hideA.statusCode).toBe(200);
+    expect(hideA.json()).toMatchObject({
+      character: { id: a.id, displayed: false },
+      selection: { displayed_character_ids: [b.id], main_id: b.id, alt_ids: [] },
+    });
+
+    const after = await ctx.pool.query<{ updated_at: Date; displayed: boolean }>(
+      `SELECT updated_at, displayed FROM characters WHERE id = $1`,
+      [a.id],
+    );
+    expect(after.rows[0]!.displayed).toBe(false);
+    expect(after.rows[0]!.updated_at.getTime()).toBe(before.rows[0]!.updated_at.getTime());
+
+    // Toggling A left B unchanged; C (stale) still not displayed.
+    const roster = (
+      await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
+    ).json() as { characters: Array<{ id: string; displayed: boolean }> };
+    expect(roster.characters.find((x) => x.id === a.id)?.displayed).toBe(false);
+    expect(roster.characters.find((x) => x.id === b.id)?.displayed).toBe(true);
+    expect(roster.characters.find((x) => x.id === c.id)?.displayed).toBe(false);
+  });
+
+  it('PUT selection accepts legacy {main_id, alt_ids} and echoes compat fields', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const chars = (
+      await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
+    ).json() as { characters: Array<{ id: string; character_name: string }> };
+    const main = chars.characters.find((c) => c.character_name === 'Lightbringer')!;
+    const alt = chars.characters.find((c) => c.character_name === 'Thornquill')!;
+
+    const legacy = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/characters/selection',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { main_id: main.id, alt_ids: [alt.id] },
+    });
+    expect(legacy.statusCode).toBe(200);
+    expect(legacy.json()).toMatchObject({
+      selection: {
+        displayed_character_ids: [main.id, alt.id],
+        main_id: main.id,
+        alt_ids: [alt.id],
+      },
+    });
+
+    const clear = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/characters/selection',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { main_id: null, alt_ids: [] },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(clear.json()).toMatchObject({
+      selection: { displayed_character_ids: [], main_id: null, alt_ids: [] },
+    });
+
+    const profile = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/profile',
+      headers: { cookie },
+    });
+    expect(profile.json()).toMatchObject({ main_character_id: null });
   });
 
   it('allows return_to=/profile/ on Battle.net login', async () => {

@@ -222,10 +222,32 @@ export async function replaceCharacters(
     }
     // Stale characters leave the display set (new chars keep displayed=false default).
     await client.query(
-      `UPDATE characters SET displayed = false, updated_at = now()
+      `UPDATE characters SET displayed = false
        WHERE user_id = $1 AND stale = true AND displayed = true`,
       [userId],
     );
+    // Keep character_selections mirror in sync after auto-hiding stale chars.
+    const liveDisplayed = await client.query<{ id: string }>(
+      `SELECT id FROM characters
+       WHERE user_id = $1 AND displayed = true AND stale = false
+       ORDER BY character_name, surname NULLS LAST`,
+      [userId],
+    );
+    const mirrorIds = liveDisplayed.rows.map((r) => r.id);
+    if (mirrorIds.length === 0) {
+      await client.query(`DELETE FROM character_selections WHERE user_id = $1`, [userId]);
+    } else {
+      await client.query(
+        `INSERT INTO character_selections (user_id, main_id, alt_ids, displayed_character_ids, updated_at)
+         VALUES ($1, $2, $3::text[], $4::text[], now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           main_id = EXCLUDED.main_id,
+           alt_ids = EXCLUDED.alt_ids,
+           displayed_character_ids = EXCLUDED.displayed_character_ids,
+           updated_at = now()`,
+        [userId, mirrorIds[0], mirrorIds.slice(1), mirrorIds],
+      );
+    }
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -249,14 +271,41 @@ export async function listCharacters(db: Db, userId: string): Promise<CharacterR
   return res.rows;
 }
 
-export async function getSelection(db: Db, userId: string): Promise<SelectionRow | null> {
+/** Mirror display set into character_selections (kept one release for rollback). */
+async function syncSelectionMirror(db: Db, userId: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) {
+    await db.query(`DELETE FROM character_selections WHERE user_id = $1`, [userId]);
+    return;
+  }
+  const main = ids[0]!;
+  const alts = ids.slice(1);
+  await db.query(
+    `INSERT INTO character_selections (user_id, main_id, alt_ids, displayed_character_ids, updated_at)
+     VALUES ($1, $2, $3::text[], $4::text[], now())
+     ON CONFLICT (user_id) DO UPDATE SET
+       main_id = EXCLUDED.main_id,
+       alt_ids = EXCLUDED.alt_ids,
+       displayed_character_ids = EXCLUDED.displayed_character_ids,
+       updated_at = now()`,
+    [userId, main, alts, ids],
+  );
+}
+
+/** Always returns a selection object (empty array when nothing is displayed). */
+export async function getSelection(db: Db, userId: string): Promise<SelectionRow> {
   const res = await db.query<{ id: string; updated_at: Date }>(
     `SELECT id, updated_at FROM characters
      WHERE user_id = $1 AND displayed = true AND stale = false
      ORDER BY character_name, surname NULLS LAST`,
     [userId],
   );
-  if (!res.rows.length) return null;
+  if (!res.rows.length) {
+    return {
+      user_id: userId,
+      displayed_character_ids: [],
+      updated_at: new Date(0),
+    };
+  }
   const updatedAt = res.rows.reduce(
     (max, row) => (row.updated_at > max ? row.updated_at : max),
     res.rows[0]!.updated_at,
@@ -274,37 +323,34 @@ export async function setSelection(
   args: { userId: string; displayedCharacterIds: string[] },
 ): Promise<SelectionRow> {
   const ids = args.displayedCharacterIds;
+  // Do not bump characters.updated_at — that timestamp is for Blizzard refresh.
   await db.query(
-    `UPDATE characters SET
-       displayed = (id = ANY($2::text[])),
-       updated_at = CASE
-         WHEN displayed IS DISTINCT FROM (id = ANY($2::text[])) THEN now()
-         ELSE updated_at
-       END
+    `UPDATE characters SET displayed = (id = ANY($2::text[]))
      WHERE user_id = $1`,
     [args.userId, ids],
   );
   const selection = await getSelection(db, args.userId);
-  if (selection) return selection;
-  return {
-    user_id: args.userId,
-    displayed_character_ids: [],
-    updated_at: new Date(),
-  };
+  await syncSelectionMirror(db, args.userId, selection.displayed_character_ids);
+  return selection;
 }
 
-/** Toggle one character's displayed flag (primary UI path). */
+/** Toggle one character's displayed flag (primary UI path). Does not bump updated_at. */
 export async function setCharacterDisplayed(
   db: Db,
   args: { userId: string; characterId: string; displayed: boolean },
 ): Promise<CharacterRow | null> {
   const res = await db.query<CharacterRow>(
-    `UPDATE characters SET displayed = $3, updated_at = now()
+    `UPDATE characters SET displayed = $3
      WHERE id = $1 AND user_id = $2
      RETURNING *`,
     [args.characterId, args.userId, args.displayed],
   );
-  return res.rows[0] ?? null;
+  const row = res.rows[0] ?? null;
+  if (row) {
+    const selection = await getSelection(db, args.userId);
+    await syncSelectionMirror(db, args.userId, selection.displayed_character_ids);
+  }
+  return row;
 }
 
 export async function getCharacterForUser(
@@ -428,10 +474,13 @@ export function characterToApi(c: CharacterRow) {
   };
 }
 
-export function selectionToApi(s: SelectionRow | null) {
-  if (!s) return null;
+export function selectionToApi(s: SelectionRow) {
+  const ids = s.displayed_character_ids ?? [];
   return {
-    displayed_character_ids: s.displayed_character_ids ?? [],
+    displayed_character_ids: ids,
+    // Compat for live web until web#43 ships (derived from display set).
+    main_id: ids[0] ?? null,
+    alt_ids: ids.slice(1),
     updated_at: s.updated_at.toISOString(),
   };
 }

@@ -6,6 +6,7 @@ import { decryptSecret, TokenDecryptError } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
 import { isBlizzardRegion } from '../blizzard/regions.js';
 import * as store from '../auth/store.js';
+import * as gear from '../gear/store.js';
 import { clearSessionCookie, requireCsrf, requireSession } from '../auth/session.js';
 
 const REFRESH_COOLDOWN_MS = 60_000;
@@ -16,10 +17,7 @@ export type ProfileDeps = {
   blizzard: BlizzardClient;
 };
 
-function characterListBody(
-  chars: store.CharacterRow[],
-  selection: store.SelectionRow | null,
-) {
+function characterListBody(chars: store.CharacterRow[], selection: store.SelectionRow) {
   return {
     game: 'wow_forever' as const,
     characters: chars.map(store.characterToApi),
@@ -27,16 +25,86 @@ function characterListBody(
   };
 }
 
-function profileBody(user: store.UserRow) {
+function profileBody(user: store.UserRow, selection: store.SelectionRow) {
+  const ids = selection.displayed_character_ids;
   return {
     battletag: user.battletag,
     preferred_region: user.preferred_region,
+    // Compat: first displayed character, or null when none (live web until web#43).
+    main_character_id: ids[0] ?? null,
     created_at: user.created_at.toISOString(),
     updated_at: user.updated_at.toISOString(),
   };
 }
 
 const PROFILE_UPDATE_KEYS = new Set(['preferred_region']);
+
+/** Parse new `{displayed_character_ids}` or legacy `{main_id, alt_ids}` into a unique id list. */
+function parseDisplayedIds(body: Record<string, unknown>): string[] {
+  if (Array.isArray(body.displayed_character_ids)) {
+    const rawIds = body.displayed_character_ids;
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const id of rawIds) {
+      if (typeof id !== 'string' || !id) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          displayed_character_ids: 'unknown_character',
+        });
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  // Legacy body used by live crusaderstrike.com until web#43.
+  if ('main_id' in body || 'alt_ids' in body) {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    const main = body.main_id;
+    if (main !== undefined && main !== null) {
+      if (typeof main !== 'string' || !main) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          main_id: 'Must be a character id or null.',
+        });
+      }
+      seen.add(main);
+      ids.push(main);
+    }
+    const alts = body.alt_ids;
+    if (alts !== undefined) {
+      if (!Array.isArray(alts)) {
+        throw new AppError(400, 'validation_error', 'Invalid selection.', {
+          alt_ids: 'Must be an array of character ids.',
+        });
+      }
+      for (const id of alts) {
+        if (typeof id !== 'string' || !id) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            alt_ids: 'unknown_character',
+          });
+        }
+        if (seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  throw new AppError(400, 'validation_error', 'Invalid selection.', {
+    displayed_character_ids: 'Must be an array of character ids.',
+  });
+}
+
+async function requireGearWriteRate(pool: Pool, userId: string, reply: { header: (k: string, v: string) => unknown }) {
+  const rate = await gear.consumeGearWrite(pool, userId);
+  if (!rate.ok) {
+    reply.header('Retry-After', String(rate.retryAfterSec));
+    throw new AppError(429, 'rate_limited', 'Too many writes. Try again shortly.');
+  }
+}
 
 export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileDeps): Promise<void> {
   const { pool, config, blizzard } = deps;
@@ -45,7 +113,8 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     const s = requireSession(req);
     const user = await store.getUser(pool, s.userId);
     if (!user) throw new AppError(401, 'unauthenticated', 'Sign in required.');
-    return profileBody(user);
+    const selection = await store.getSelection(pool, s.userId);
+    return profileBody(user, selection);
   });
 
   app.put('/api/v1/me/profile', async (req) => {
@@ -73,7 +142,8 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     }
     const user = await store.getUser(pool, s.userId);
     if (!user) throw new AppError(401, 'unauthenticated', 'Sign in required.');
-    return profileBody(user);
+    const selection = await store.getSelection(pool, s.userId);
+    return profileBody(user, selection);
   });
 
   app.get('/api/v1/me/characters', async (req) => {
@@ -83,9 +153,10 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     return characterListBody(chars, selection);
   });
 
-  app.patch('/api/v1/me/characters/:characterId', async (req) => {
+  app.patch('/api/v1/me/characters/:characterId', async (req, reply) => {
     requireCsrf(req);
     const s = requireSession(req);
+    await requireGearWriteRate(pool, s.userId, reply);
     const { characterId } = req.params as { characterId: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -114,7 +185,11 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
       displayed: body.displayed,
     });
     if (!updated) throw new AppError(404, 'not_found', 'Character not found.');
-    return { character: store.characterToApi(updated) };
+    const selection = await store.getSelection(pool, s.userId);
+    return {
+      character: store.characterToApi(updated),
+      selection: store.selectionToApi(selection),
+    };
   });
 
   app.post('/api/v1/me/characters/refresh', async (req, reply) => {
@@ -166,25 +241,13 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
   app.put('/api/v1/me/characters/selection', async (req) => {
     requireCsrf(req);
     const s = requireSession(req);
-    const body = (req.body ?? {}) as { displayed_character_ids?: unknown };
-    if (!body || !Array.isArray(body.displayed_character_ids)) {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
       throw new AppError(400, 'validation_error', 'Invalid selection.', {
-        displayed_character_ids: 'Must be an array of character ids.',
+        body: 'Expected a JSON object.',
       });
     }
-    const rawIds = body.displayed_character_ids;
-    const seen = new Set<string>();
-    const ids: string[] = [];
-    for (const id of rawIds) {
-      if (typeof id !== 'string' || !id) {
-        throw new AppError(400, 'validation_error', 'Invalid selection.', {
-          displayed_character_ids: 'unknown_character',
-        });
-      }
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
+    const ids = parseDisplayedIds(body);
     const chars = await store.listCharacters(pool, s.userId);
     const live = new Map(
       chars
@@ -193,8 +256,11 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     );
     for (const id of ids) {
       if (!live.has(id)) {
+        const field = Array.isArray(body.displayed_character_ids)
+          ? 'displayed_character_ids'
+          : 'main_id';
         throw new AppError(400, 'validation_error', 'Invalid selection.', {
-          displayed_character_ids: 'unknown_character',
+          [field]: 'unknown_character',
         });
       }
     }
