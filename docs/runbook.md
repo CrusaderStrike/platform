@@ -57,8 +57,10 @@ After any change, check that `curl -fsS https://api.crusaderstrike.com/healthz` 
 ## Monitoring (DigitalOcean, $0/month)
 - do-agent is installed and active (Monitoring is free: https://docs.digitalocean.com/products/monitoring/details/pricing/).
 - Uptime check `227c7160-ea24-47b8-b5d2-a56630c25dd3` on https://crusaderstrike.com from us_west and us_east. This is the account's one free check (https://docs.digitalocean.com/products/uptime/details/pricing/). **Never create a second one; each extra check costs $1/month.**
-- Planned alerts, all to platform@crusaderstrike.com: droplet CPU >80%, memory >90% and disk >80%, each over a 5-minute window; uptime alerts for down, latency >2000 ms, and TLS certificate expiry within 14 days.
-- Status: the alerts are not created yet because DigitalOcean only accepts a verified team-member email as an alert recipient (see #24).
+- Alerts, all sent to the DO account's verified login email (a team member, so no invite or cost):
+  - Droplet 616006981 policies, each over a 5-minute window: CPU >80% `0501a01d-4a88-4480-9892-6801ec55adc9`, memory >90% `8daf279b-fd42-472a-b5b1-77383f73b49d`, disk >80% `fd1665cd-e620-4dd7-9bd7-7c66c02a04d7`.
+  - Uptime check alerts: down `cfd25c0c-a302-4609-8cf8-ba92566668e1`, latency >2000 ms `a3d7de56-9cf7-4352-9610-202d9043af10`, TLS certificate expiry within 14 days `12e14577-c4c9-44f3-970b-8ddfa5228422`.
+  - Fire test (2026-11-04): CPU threshold temporarily lowered to 1% (droplet CPU ~2%), then restored to 80%.
 
 ## Incident checklist
 1. Check /healthz and https://crusaderstrike.com.
