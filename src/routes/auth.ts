@@ -3,7 +3,6 @@ import type { Pool } from '../db/pool.js';
 import type { Config } from '../config.js';
 import type { BlizzardClient } from '../blizzard/client.js';
 import { encryptSecret, isSafeReturnTo, safeWebRedirect, randomToken, sha256Base64Url } from '../lib/crypto.js';
-import { AppError } from '../lib/errors.js';
 import * as store from '../auth/store.js';
 import {
   clearSessionCookie,
@@ -21,11 +20,38 @@ export type AuthDeps = {
   redirectUri: string;
 };
 
+const DEFAULT_RETURN_TO = '/profile/';
+
+function truncateReturnTo(value: string, max = 64): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}…`;
+}
+
+/** Resolve a client-supplied return_to; invalid/missing → /profile/. Logs at most a truncated value. */
+function resolveReturnTo(
+  siteOrigin: string,
+  raw: string | undefined,
+  log?: { warn: (obj: Record<string, unknown>, msg: string) => void },
+): string {
+  if (raw === undefined || raw === '') return DEFAULT_RETURN_TO;
+  if (isSafeReturnTo(raw)) {
+    try {
+      // Also reject values that would leave the site origin after URL resolution.
+      safeWebRedirect(siteOrigin, raw);
+      return raw;
+    } catch {
+      // fall through
+    }
+  }
+  log?.warn({ return_to_truncated: truncateReturnTo(raw) }, 'rejected return_to; using /profile/');
+  return DEFAULT_RETURN_TO;
+}
+
 function webRedirect(config: Config, returnTo: string, params: Record<string, string>): string {
   try {
     return safeWebRedirect(config.PUBLIC_WEB_ORIGIN, returnTo, params);
   } catch {
-    return safeWebRedirect(config.PUBLIC_WEB_ORIGIN, '/signin.html', params);
+    return safeWebRedirect(config.PUBLIC_WEB_ORIGIN, DEFAULT_RETURN_TO, params);
   }
 }
 
@@ -38,20 +64,8 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
 
   app.get('/api/v1/auth/blizzard/login', async (req, reply) => {
     const q = req.query as { return_to?: string };
-    const returnTo = q.return_to ?? '/signin.html';
-    if (!isSafeReturnTo(returnTo)) {
-      throw new AppError(400, 'validation_error', 'Invalid return_to.', {
-        return_to: 'Must be a relative same-site path starting with a single /.',
-      });
-    }
-    // Also reject values that would leave the site origin after URL resolution.
-    try {
-      safeWebRedirect(config.PUBLIC_WEB_ORIGIN, returnTo);
-    } catch {
-      throw new AppError(400, 'validation_error', 'Invalid return_to.', {
-        return_to: 'Must be a relative same-site path starting with a single /.',
-      });
-    }
+    // Invalid / missing return_to soft-falls back to /profile/ (platform#64). Never 400.
+    const returnTo = resolveReturnTo(config.PUBLIC_WEB_ORIGIN, q.return_to, req.log);
     const state = randomToken(24);
     const codeVerifier = randomToken(32);
     const codeChallenge = sha256Base64Url(codeVerifier);
@@ -69,7 +83,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     };
     const state = q.state ?? '';
     const saved = state ? await store.takeOauthState(pool, state) : null;
-    const returnTo = saved?.returnTo && isSafeReturnTo(saved.returnTo) ? saved.returnTo : '/signin.html';
+    // Never read return_to from the callback query — only the server-stored path (single-use via take).
+    const returnTo =
+      saved?.returnTo && isSafeReturnTo(saved.returnTo) ? saved.returnTo : DEFAULT_RETURN_TO;
 
     if (q.error === 'access_denied') {
       return reply.redirect(webRedirect(config, returnTo, { auth: 'cancelled' }));
