@@ -8,8 +8,15 @@ import {
   apiBaseUrlForRegion,
   isBlizzardRegion,
   profileNamespace,
+  staticNamespace,
   type BlizzardRegion,
 } from './regions.js';
+import { sanitizeBlizzardIconUrl, iconNameFromUrl } from '../lib/icon-url.js';
+import type {
+  BlizzardItem,
+  BlizzardItemMedia,
+  BlizzardItemSearchPage,
+} from './items.js';
 
 export type BlizzardClientConfig = {
   clientId: string;
@@ -41,19 +48,32 @@ export type BlizzardClient = {
   /** Fetch Forever characters across all configured regions and merge. */
   fetchForeverCharactersAll(accessToken: string): Promise<NormalizedCharacter[]>;
   /**
-   * Item Media icon HTTPS URL for Forever.
-   * Currently always returns null: Blizzard has not published an official Forever
-   * static namespace that pairs with profile-forever-{region}. Community probes
-   * suggest static-forever-{region}, but that is unconfirmed — do not call Item
-   * Media until develop.battle.net documents it.
-   * TODO(forever-static): resume GET /data/wow/media/item/{id} with the official
-   * static-forever-{region} (or whatever Blizzard publishes) once confirmed.
+   * Item Media icon HTTPS URL for Forever (`static-forever-{region}`).
+   * Confirmed live 2026-11-04; never falls back to classic/retail namespaces.
    */
   fetchItemIconUrl(
     accessToken: string,
     itemId: number,
     region?: BlizzardRegion,
   ): Promise<{ iconUrl: string | null; iconName: string | null }>;
+  /** Client-credentials token for Game Data (import / public catalog). */
+  fetchClientCredentialsToken(): Promise<string>;
+  /** Forever item detail. */
+  fetchItem(
+    accessToken: string,
+    itemId: number,
+    region?: BlizzardRegion,
+  ): Promise<BlizzardItem | null>;
+  /** Forever item search page filtered by inventory_type.type. */
+  searchItems(
+    accessToken: string,
+    args: {
+      inventoryType: string;
+      page?: number;
+      pageSize?: number;
+      region?: BlizzardRegion;
+    },
+  ): Promise<BlizzardItemSearchPage>;
 };
 
 function mapFaction(raw?: string | null): 'alliance' | 'horde' | null {
@@ -209,15 +229,81 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
       }
       return all;
     },
-    async fetchItemIconUrl(_accessToken, _itemId, _region = cfg.region) {
-      // Skip Item Media until Blizzard publishes an official Forever static namespace
-      // (community probes name static-forever-{region}; unconfirmed — do not guess).
-      // TODO(forever-static): call GET /data/wow/media/item/{id}?namespace=static-forever-{region}
-      // once develop.battle.net documents it; sanitize with sanitizeBlizzardIconUrl.
-      void _accessToken;
-      void _itemId;
-      void _region;
-      return { iconUrl: null, iconName: null };
+    async fetchItemIconUrl(accessToken, itemId, region = cfg.region) {
+      if (!isBlizzardRegion(region)) return { iconUrl: null, iconName: null };
+      const ns = staticNamespace(region);
+      const url = `${apiBaseFor(region)}/data/wow/media/item/${itemId}?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (res.status === 404) return { iconUrl: null, iconName: null };
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_media_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      const body = (await res.json()) as BlizzardItemMedia;
+      const raw = body.assets?.find((a) => a.key === 'icon')?.value ?? null;
+      const iconUrl = sanitizeBlizzardIconUrl(raw);
+      return { iconUrl, iconName: iconNameFromUrl(iconUrl) };
+    },
+
+    async fetchClientCredentialsToken() {
+      const body = new URLSearchParams({ grant_type: 'client_credentials' });
+      const tok = await tokenRequest(body);
+      return tok.access_token;
+    },
+
+    async fetchItem(accessToken, itemId, region = cfg.region) {
+      if (!isBlizzardRegion(region)) return null;
+      const ns = staticNamespace(region);
+      const url = `${apiBaseFor(region)}/data/wow/item/${itemId}?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      return (await res.json()) as BlizzardItem;
+    },
+
+    async searchItems(accessToken, args) {
+      const region = args.region ?? cfg.region;
+      if (!isBlizzardRegion(region)) return { results: [], page: 1, pageCount: 0 };
+      const ns = staticNamespace(region);
+      const page = args.page ?? 1;
+      const pageSize = args.pageSize ?? 100;
+      const url = new URL(`${apiBaseFor(region)}/data/wow/search/item`);
+      url.searchParams.set('namespace', ns);
+      url.searchParams.set('locale', 'en_US');
+      url.searchParams.set('orderby', 'id');
+      url.searchParams.set('_page', String(page));
+      url.searchParams.set('_pageSize', String(pageSize));
+      url.searchParams.set('inventory_type.type', args.inventoryType);
+      const res = await fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_search_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      return (await res.json()) as BlizzardItemSearchPage;
     },
   };
 }

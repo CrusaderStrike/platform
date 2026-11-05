@@ -23,6 +23,11 @@ export function profileNamespace(region: BlizzardRegion): string {
   return `profile-forever-${region}`;
 }
 
+/** Forever Game Data / Item Media static namespace (confirmed 2026-11-04). */
+export function staticNamespace(region: BlizzardRegion): string {
+  return `static-forever-${region}`;
+}
+
 export function parseRegionsList(raw: string | undefined | null): BlizzardRegion[] {
   const input = (raw ?? 'us').trim() || 'us';
   const parts = input.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);

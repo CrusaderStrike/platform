@@ -293,8 +293,10 @@ describe('Blizzard OAuth + characters (#11)', () => {
       character_id: id,
       items: [{ slot: 'head', itemId: 12345, name: 'Crown' }],
     });
-    // Forever Item Media skipped until official static namespace is documented → icon_url null
-    expect(putBody.items[0]!.icon_url).toBeNull();
+    // Forever static Item Media enabled (platform#39) → sanitized forever-us icon URL
+    expect(putBody.items[0]!.icon_url).toBe(
+      'https://render.worldofwarcraft.com/forever-us/icons/56/inv_helmet_03.jpg',
+    );
 
     const get = await ctx.app.inject({
       method: 'GET',
@@ -304,7 +306,12 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(get.statusCode).toBe(200);
     expect(get.json()).toMatchObject({
       character_id: id,
-      items: [{ itemId: 12345, icon_url: null }],
+      items: [
+        {
+          itemId: 12345,
+          icon_url: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_helmet_03.jpg',
+        },
+      ],
     });
 
     const put2 = await ctx.app.inject({
@@ -315,7 +322,12 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(put2.statusCode).toBe(200);
     expect(put2.json()).toMatchObject({
-      items: [{ itemId: 12345, icon_url: null }],
+      items: [
+        {
+          itemId: 12345,
+          icon_url: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_helmet_03.jpg',
+        },
+      ],
     });
   });
 
@@ -371,7 +383,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
   });
 
 
-  it('gear icon_url stays null while Forever Item Media is skipped', async () => {
+  it('gear icon_url sanitizes bad media and never stores classic URLs', async () => {
     ctx = await startTestApp();
     const { cookie, csrf } = await signIn(ctx);
     const chars = (
@@ -379,6 +391,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     ).json() as { characters: Array<{ id: string }> };
     const id = chars.characters[0]!.id;
 
+    // 90001 → http media from mock; sanitizer yields null
     const put = await ctx.app.inject({
       method: 'PUT',
       url: `/api/v1/characters/${id}/gear`,
@@ -387,14 +400,10 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(put.statusCode).toBe(200);
     expect((put.json() as { items: Array<{ icon_url: string | null }> }).items[0]!.icon_url).toBeNull();
-    // Client must not resolve Item Media while Forever static namespace is unconfirmed.
-    const mediaHits = await ctx.pool.query(`SELECT count(*)::int AS n FROM item_icon_cache`);
-    // May cache null lookup or skip entirely depending on resolve path; never a classic URL.
     const bad = await ctx.pool.query(
       `SELECT icon_url FROM item_icon_cache WHERE icon_url IS NOT NULL AND icon_url ILIKE '%classic%'`,
     );
     expect(bad.rowCount).toBe(0);
-    void mediaHits;
   });
 
   it('refresh with non-v1 token → 401 and tokens cleared', async () => {

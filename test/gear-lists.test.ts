@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { startTestApp, signIn, shutdownEmbeddedPg, type TestCtx } from './helpers/setup.js';
 import * as gear from '../src/gear/store.js';
+import * as foreverItems from '../src/items/store.js';
 
 
 async function clearCooldown(ctx: TestCtx) {
@@ -39,8 +40,11 @@ describe('gear lists (platform#17)', () => {
     await ctx.pool.query(`
       TRUNCATE public_api_rate_limits, upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
                gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
-               item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
+               forever_items, forever_items_meta, item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
     `);
+    await ctx.pool.query(
+      `INSERT INTO forever_items_meta (id, build_id, item_count) VALUES (1, 'empty', 0) ON CONFLICT (id) DO NOTHING`,
+    );
   });
 
   it('creates lists per character, caps at 5 with 409 list_limit_reached', async () => {
@@ -338,15 +342,13 @@ describe('gear lists (platform#17)', () => {
     expect(body.gear[0]!.events.some((e) => e.event_type === 'GearItemAdded')).toBe(true);
   });
 
-  it('GET /items/search returns 501 not_implemented', async () => {
-    const { cookie } = await signIn(ctx);
+    it('GET /items/search is aliased to Forever catalog (empty until import)', async () => {
     const res = await ctx.app.inject({
       method: 'GET',
       url: '/api/v1/items/search?q=thunder',
-      headers: { cookie },
     });
-    expect(res.statusCode).toBe(501);
-    expect(res.json()).toMatchObject({ error: { code: 'not_implemented' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ items: [], next_cursor: null });
   });
 
   it('events history includes actor display_name', async () => {
@@ -953,5 +955,163 @@ describe('gear lists (platform#17)', () => {
     }
   });
 
-});
 
+  it('catalogIsActive stays off until setMeta; mid-import upserts do not enforce item_not_forever', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await clearCooldown(ctx);
+    await foreverItems.upsertItem(ctx.pool, {
+      itemId: 19019,
+      name: 'Thunderfury',
+      slot: 'main_hand',
+      slotAliases: ['off_hand'],
+      inventoryType: 'WEAPON',
+      quality: 'legendary',
+      itemLevel: 80,
+      requiredLevel: 60,
+      armorType: null,
+      itemClass: 2,
+      itemSubclass: 7,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    // Meta still empty — catalog must not be active mid-import.
+    expect(await foreverItems.catalogIsActive(ctx.pool)).toBe(false);
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'MidImport' },
+    });
+    expect(created.statusCode).toBe(201);
+    const list = created.json() as { id: string; version: number };
+    await clearCooldown(ctx);
+    const unknownId = 424242;
+    const addUnknown = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: randomUUID(),
+            type: 'add_item',
+            slot: 'head',
+            item_id: unknownId,
+            priority: 1,
+            base_version: list.version,
+          },
+        ],
+      },
+    });
+    expect(addUnknown.statusCode).toBe(200);
+    expect(addUnknown.json()).toMatchObject({
+      applied: [expect.any(String)],
+      conflicts: [],
+    });
+
+    await foreverItems.setMeta(ctx.pool, {
+      buildId: 'test-complete-1',
+      itemCount: 1,
+      region: 'us',
+    });
+    expect(await foreverItems.catalogIsActive(ctx.pool)).toBe(true);
+    await clearCooldown(ctx);
+    const rejectId = randomUUID();
+    const afterMeta = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: rejectId,
+            type: 'add_item',
+            slot: 'neck',
+            item_id: 999999,
+            priority: 1,
+            base_version: (addUnknown.json() as { version: number }).version,
+          },
+        ],
+      },
+    });
+    expect(afterMeta.statusCode).toBe(200);
+    expect(afterMeta.json()).toMatchObject({
+      conflicts: [expect.objectContaining({ op_id: rejectId, reason: 'item_not_forever' })],
+    });
+  });
+
+  it('remove_item still works for ids absent from an active Forever catalog', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await clearCooldown(ctx);
+    await foreverItems.upsertItem(ctx.pool, {
+      itemId: 19019,
+      name: 'Thunderfury',
+      slot: 'main_hand',
+      slotAliases: ['off_hand'],
+      inventoryType: 'WEAPON',
+      quality: 'legendary',
+      itemLevel: 80,
+      requiredLevel: 60,
+      armorType: null,
+      itemClass: 2,
+      itemSubclass: 7,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    await foreverItems.setMeta(ctx.pool, {
+      buildId: 'test-complete-orphan',
+      itemCount: 1,
+      region: 'us',
+    });
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'OrphanRow' },
+    });
+    const list = created.json() as { id: string };
+    const guild = await ctx.pool.query<{ guild_id: string }>(
+      `SELECT guild_id FROM gear_lists WHERE id = $1`,
+      [list.id],
+    );
+    await ctx.pool.query(
+      `INSERT INTO gear_list_items (guild_id, list_id, slot, item_id, priority, note, obtained, obtained_at)
+       VALUES ($1,$2,'head',777001,1,NULL,false,NULL)`,
+      [guild.rows[0]!.guild_id, list.id],
+    );
+    await clearCooldown(ctx);
+    const removeId = randomUUID();
+    const remove = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: removeId,
+            type: 'remove_item',
+            slot: 'head',
+            item_id: 777001,
+            base_version: 1,
+          },
+        ],
+      },
+    });
+    expect(remove.statusCode).toBe(200);
+    const body = remove.json() as {
+      applied: string[];
+      conflicts: unknown[];
+      list: { items: unknown[] };
+    };
+    expect(body.conflicts).toEqual([]);
+    expect(body.applied).toEqual([removeId]);
+    expect(body.list.items).toEqual([]);
+  });
+
+});

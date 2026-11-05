@@ -11,6 +11,7 @@ import { registerGearRoutes } from './routes/gear.js';
 import { registerUploadRoutes } from './routes/uploads.js';
 import { registerGearListRoutes } from './routes/gear-lists.js';
 import { registerPublicGuildRoutes } from './routes/public-guilds.js';
+import { registerItemsRoutes } from './routes/items.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -91,6 +92,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await registerUploadRoutes(app, { pool: opts.pool });
   await registerGearListRoutes(app, { pool: opts.pool });
   await registerPublicGuildRoutes(app, { pool: opts.pool });
+  await registerItemsRoutes(app, { pool: opts.pool });
 
   return app;
 }
