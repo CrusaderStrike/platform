@@ -38,8 +38,8 @@ const INV_TO_SLOT: Record<string, SlotMapping> = {
   CLOAK: { slot: 'back', aliases: [] },
   TABARD: { slot: 'tabard', aliases: [] },
   ROBE: { slot: 'chest', aliases: [] },
-  /** Arrows / bullets — Forever inventory_type AMMO (subclass distinguishes). */
-  AMMO: { slot: 'ranged', aliases: [] },
+  /** Arrows / bullets — Forever AMMO → dedicated `ammo` slot (not ranged). */
+  AMMO: { slot: 'ammo', aliases: [] },
   /** Relics / librams / totems / idols — Forever inventory_type RELIC. */
   RELIC: { slot: 'ranged', aliases: [] },
 };
@@ -82,10 +82,16 @@ export function normalizeQuality(raw: string | null | undefined): string {
   return raw.toLowerCase();
 }
 
+/** Blizzard Forever test/junk item ids skipped by the importer. */
+export const IMPORT_EXCLUDED_ITEM_IDS = new Set<number>([
+  19082, // Monster - Fire Arrow
+  19286, // Fast Test Ammo
+]);
+
 /**
- * Inventory types the importer walks (covers all 19 GearSlots).
+ * Inventory types the importer walks (covers all GearSlots including ammo).
  * Forever search confirmed 2026-11-05: TWOHWEAPON (2HWEAPON returns empty),
- * RELIC (libram/totem/idol/relic), AMMO (arrows/bullets).
+ * RELIC (libram/totem/idol/relic), AMMO (arrows/bullets → ammo slot).
  */
 export const IMPORT_INVENTORY_TYPES = [
   'HEAD',

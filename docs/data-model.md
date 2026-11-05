@@ -66,6 +66,8 @@ This document covers the parts of platform#2 that platform#17 needs (guild stub 
 
 **`gear_lists`:** `id`, `guild_id`, `character_id`, `owner_user_id`, `name`, `version` (= last applied `seq`), `visibility` (`private` \| `guild`), `deleted_at`, `updated_at`, `updated_source`, `updated_by`.
 
+**GearSlots (20):** the classic 19 armory slots plus **`ammo`** (platform#73). `ammo` holds Forever `AMMO` (arrows/bullets) for Warrior, Rogue, and Hunter. Platform does not yet enforce class-eligibility — clients should hide `ammo` for other classes.
+
 **`gear_list_items`:** PK `(list_id, slot, item_id)`; columns `guild_id`, `priority`, `note`, `obtained`, `obtained_at`.
 
 **`gear_op_noop_ids`:** PK `(guild_id, idempotency_key)`; columns `list_id`, `recorded_at`. Markers for no-op `set_slot`/`clear_slot` (no event / no version bump). **Retention:** `GEAR_OP_NOOP_RETENTION_DAYS` (default 30). Post-expiry retries re-evaluate (`base_version` still guards). Prune via `prune_gear_op_noop_ids()` SECURITY DEFINER — see runbook § gear_op_noop_ids retention (platform#47).

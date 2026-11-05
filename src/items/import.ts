@@ -11,6 +11,7 @@ import { startMockBlizzard } from '../blizzard/mock.js';
 import type { BlizzardRegion } from '../blizzard/regions.js';
 import { isBlizzardRegion } from '../blizzard/regions.js';
 import {
+  IMPORT_EXCLUDED_ITEM_IDS,
   IMPORT_INVENTORY_TYPES,
   armorTypeFromClass,
   mapInventoryType,
@@ -158,6 +159,7 @@ async function main(): Promise<void> {
       for (const hit of results) {
         const id = hit.data?.id;
         if (!id || seen.has(id)) continue;
+        if (IMPORT_EXCLUDED_ITEM_IDS.has(id)) continue;
         seen.add(id);
         try {
           const detail = await withRetries(`item:${id}`, () => blizzard.fetchItem(token, id, region));

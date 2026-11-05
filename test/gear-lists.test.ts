@@ -87,7 +87,7 @@ describe('gear lists (platform#17)', () => {
       expect(body.type).toBe('max_level');
       expect(body.outgrown).toBe(false);
       expect(body.edited_at).toBeTruthy();
-      expect(Object.keys(body.slots)).toHaveLength(19);
+      expect(Object.keys(body.slots)).toHaveLength(20);
     }
     await clearCooldown(ctx);
     const twentyFirst = await ctx.app.inject({

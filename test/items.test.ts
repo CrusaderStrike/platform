@@ -103,7 +103,7 @@ describe('Forever items catalog', () => {
     expect(mapInventoryType('TWOHWEAPON')?.slot).toBe('main_hand');
     expect(mapInventoryType('2HWEAPON')?.slot).toBe('main_hand');
     expect(mapInventoryType('RELIC')?.slot).toBe('ranged');
-    expect(mapInventoryType('AMMO')?.slot).toBe('ranged');
+    expect(mapInventoryType('AMMO')?.slot).toBe('ammo');
     expect(mapInventoryType('THROWN')?.slot).toBe('ranged');
     expect(mapInventoryType('TABARD')?.slot).toBe('tabard');
     expect(mapInventoryType('TRINKET')).toEqual({ slot: 'trinket1', aliases: ['trinket2'] });
@@ -112,11 +112,19 @@ describe('Forever items catalog', () => {
   });
 
   it('IMPORT_INVENTORY_TYPES includes Forever TWOHWEAPON, RELIC, AMMO (not empty 2HWEAPON)', async () => {
-    const { IMPORT_INVENTORY_TYPES } = await import('../src/items/mapping.js');
+    const { IMPORT_INVENTORY_TYPES, IMPORT_EXCLUDED_ITEM_IDS } = await import('../src/items/mapping.js');
     expect(IMPORT_INVENTORY_TYPES).toContain('TWOHWEAPON');
     expect(IMPORT_INVENTORY_TYPES).toContain('RELIC');
     expect(IMPORT_INVENTORY_TYPES).toContain('AMMO');
     expect(IMPORT_INVENTORY_TYPES).not.toContain('2HWEAPON');
+    expect(IMPORT_EXCLUDED_ITEM_IDS.has(19082)).toBe(true); // Monster - Fire Arrow
+    expect(IMPORT_EXCLUDED_ITEM_IDS.has(19286)).toBe(true); // Fast Test Ammo
+  });
+
+  it('GEAR_SLOTS includes ammo as a 20th slot', async () => {
+    const { GEAR_SLOTS } = await import('../src/gear/schema.js');
+    expect(GEAR_SLOTS).toContain('ammo');
+    expect(GEAR_SLOTS).toHaveLength(20);
   });
 
   it('decideCatalogMetaActivation refuses setMeta on --only or item_errors > 0', async () => {
