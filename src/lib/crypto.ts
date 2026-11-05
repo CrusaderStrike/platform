@@ -97,6 +97,30 @@ export const FORBIDDEN_TOKEN_ENC_KEYS = new Set([
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
 ]);
 
+/**
+ * Heuristic weak-key detection (platform#66). `openssl rand -hex 32` output essentially
+ * never trips these: it has ~14-16 distinct hex digits and no short repeating period.
+ */
+export function isWeakKeyMaterial(lowerHex: string): boolean {
+  // Too few distinct hex digits (e.g. "0101…", "deadbeef…" repeated).
+  if (new Set(lowerHex).size < 8) return true;
+  // Short repeating period (any block of <=16 chars repeated across the key).
+  for (let period = 1; period <= 16; period++) {
+    if (64 % period !== 0) continue;
+    if (lowerHex.slice(0, period).repeat(64 / period) === lowerHex) return true;
+  }
+  // Monotonic hex runs like 0123456789abcdef… / fedcba98… (cyclic).
+  const digits = [...lowerHex].map((c) => parseInt(c, 16));
+  let up = 0;
+  let down = 0;
+  for (let i = 1; i < digits.length; i++) {
+    if (digits[i]! === (digits[i - 1]! + 1) % 16) up++;
+    if (digits[i]! === (digits[i - 1]! + 15) % 16) down++;
+  }
+  if (up >= 48 || down >= 48) return true;
+  return false;
+}
+
 export type TokenKeyValidation =
   | { ok: true; keyHex: string }
   | { ok: false; reason: string };
@@ -125,6 +149,9 @@ export function validateTokenEncKey(raw: string | undefined | null): TokenKeyVal
   }
   // Low entropy: all identical hex digits (e.g. 0000… or aaaa…).
   if (/^(.)\1{63}$/i.test(raw)) {
+    return { ok: false, reason: 'TOKEN_ENC_KEY is low-entropy' };
+  }
+  if (isWeakKeyMaterial(lower)) {
     return { ok: false, reason: 'TOKEN_ENC_KEY is low-entropy' };
   }
   return { ok: true, keyHex: lower };

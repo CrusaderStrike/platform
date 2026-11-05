@@ -167,6 +167,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       );
     }
     previous = v.TOKEN_ENC_KEY_PREVIOUS.toLowerCase();
+    if (production) {
+      const prevCheck = validateTokenEncKey(previous);
+      if (!prevCheck.ok) {
+        throw new Error(
+          `Invalid configuration: ${prevCheck.reason.replace('TOKEN_ENC_KEY', 'TOKEN_ENC_KEY_PREVIOUS')}`,
+        );
+      }
+      if (previous === tokenKey) {
+        throw new Error(
+          'Invalid configuration: TOKEN_ENC_KEY_PREVIOUS must differ from TOKEN_ENC_KEY',
+        );
+      }
+    }
   }
 
   if (production && v.BLIZZARD_MOCK) {

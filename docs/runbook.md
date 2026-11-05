@@ -422,6 +422,19 @@ openssl rand -hex 32
 ### Force re-login fallback
 If you cannot keep the previous key (compromise, lost key), deploy with only the new `TOKEN_ENC_KEY`. Any stored token that is missing the `v1:` prefix or fails decrypt is cleared; the user gets `401 session_expired` and must sign in again. Logs include `user_id` and error code only — **never the key or token material**.
 
+### Boot validation (platform#66)
+In production (`NODE_ENV=production` or `APP_ENV=production`) the API **refuses to start** if `TOKEN_ENC_KEY` is missing, not exactly 64 hex chars (32 bytes), the `.env.example` / compose example value, or weak (fewer than 8 distinct hex digits, a repeating block of ≤16 chars, or a long sequential run). `TOKEN_ENC_KEY_PREVIOUS`, when set, gets the same checks and must differ from `TOKEN_ENC_KEY`. Errors name only the variable and the reason category — never the key or any part of it. A fresh `openssl rand -hex 32` always passes.
+
+### What happens to existing sessions
+| Change | Effect on users |
+|---|---|
+| Rotate with old key in `TOKEN_ENC_KEY_PREVIOUS` | None. `cs_session` cookies stay valid; stored `v1:` tokens decrypt with the previous key; re-login writes under the new key. |
+| Drop `TOKEN_ENC_KEY_PREVIOUS` (or rotate without it) | Sessions stay valid until a route needs the Blizzard token (e.g. character refresh). Then the token fails decrypt, is cleared, the session is revoked and the user gets `401 session_expired` → sign in again. |
+| Stored token without `v1:` prefix (legacy/plaintext) | Treated as invalid: cleared, session revoked, `401 session_expired`. Never used as a bearer token. |
+| `SESSION_SECRET` rotation (separate) | Not covered here; does not affect stored tokens. |
+
+Before deploying a rotation, check the new key passes (without printing it) and count rows lacking the prefix: `SELECT count(*) FROM users WHERE access_token IS NOT NULL AND access_token NOT LIKE 'v1:%';` — that many users will be asked to sign in again.
+
 ### Where the key is stored
 Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; never overwrite — append / rotate via `TOKEN_ENC_KEY_PREVIOUS`). Who can rotate: Platform Dev via Bot-approved deploy.
 
