@@ -62,6 +62,29 @@ async function ensurePg(): Promise<string> {
   await pg.start();
   await pg.createDatabase('crusaderstrike');
   databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/crusaderstrike`;
+  // Prod sets BYPASSRLS via initdb/01-roles.sh. Migration 012 requires it (no ALTER ROLE
+  // in-migration). Pre-create / align roles so the SECURITY DEFINER sweeper check passes.
+  {
+    const boot = createPool(databaseUrl);
+    try {
+      await boot.query(`
+        DO $do$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crusaderstrike_migrate') THEN
+            CREATE ROLE crusaderstrike_migrate NOLOGIN BYPASSRLS;
+          ELSE
+            ALTER ROLE crusaderstrike_migrate WITH BYPASSRLS;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crusaderstrike_app') THEN
+            CREATE ROLE crusaderstrike_app NOLOGIN NOBYPASSRLS;
+          END IF;
+        END
+        $do$;
+      `);
+    } finally {
+      await boot.end();
+    }
+  }
   await migrate(databaseUrl);
   return databaseUrl;
 }
@@ -75,7 +98,7 @@ export async function startTestApp(opts?: {
   const pool = createPool(url);
   await pool.query(`
     TRUNCATE public_api_rate_limits, upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
-             gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
+             gear_op_noop_ids, gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
              forever_items, forever_items_meta, item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
   `);
   await pool.query(`INSERT INTO forever_items_meta (id, build_id, item_count) VALUES (1, 'empty', 0) ON CONFLICT (id) DO NOTHING`);

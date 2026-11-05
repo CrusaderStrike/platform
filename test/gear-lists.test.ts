@@ -3,6 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { startTestApp, signIn, shutdownEmbeddedPg, type TestCtx } from './helpers/setup.js';
 import * as gear from '../src/gear/store.js';
 import * as foreverItems from '../src/items/store.js';
+import {
+  GEAR_OP_NOOP_RETENTION_DAYS,
+  pruneExpiredNoopOpIds,
+  resetWritePathPruneThrottleForTests,
+  runNoopRetentionTick,
+  scheduleWritePathNoopPrune,
+  setPruneExpiredNoopOpIdsForTests,
+} from '../src/gear/noop-retention.js';
 
 
 async function clearCooldown(ctx: TestCtx) {
@@ -2046,6 +2054,342 @@ describe('gear lists (platform#17)', () => {
     ]);
     expect(addStaleBody.gear[0]!.result.list.items).toEqual([]);
   });
+
+
+
+
+  it('gear_op_noop_ids retention: in-window retries dedupe; older rows prune (platform#47)', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+
+    await clearCooldown(ctx);
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [{ op_id: randomUUID(), type: 'set_slot', slot: 'head', item_id: 16846, base_version: 1 }],
+      },
+    });
+
+    await clearCooldown(ctx);
+    const freshNoopId = randomUUID();
+    const freshNoop = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(freshNoop.statusCode).toBe(200);
+    expect((freshNoop.json() as { applied: string[]; version: number }).applied).toEqual([
+      freshNoopId,
+    ]);
+    expect((freshNoop.json() as { version: number }).version).toBe(2);
+
+    const freshKey = `op:${freshNoopId}`;
+    expect(
+      (
+        await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [
+          freshKey,
+        ])
+      ).rowCount,
+    ).toBe(1);
+
+    const staleKey = `op:${randomUUID()}`;
+    const guildId = (
+      await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM gear_lists WHERE id = $1`, [
+        list.id,
+      ])
+    ).rows[0]!.guild_id;
+    await ctx.pool.query(
+      `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key, recorded_at)
+       VALUES ($1, $2, $3, now() - make_interval(days => $4))`,
+      [guildId, list.id, staleKey, GEAR_OP_NOOP_RETENTION_DAYS + 1],
+    );
+
+    const pruned = await pruneExpiredNoopOpIds(ctx.pool);
+    expect(pruned.deleted).toBeGreaterThanOrEqual(1);
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [staleKey]))
+        .rowCount,
+    ).toBe(0);
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [freshKey]))
+        .rowCount,
+    ).toBe(1);
+
+    await clearCooldown(ctx);
+    const retry = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect((retry.json() as { duplicates: string[]; version: number }).duplicates).toEqual([
+      freshNoopId,
+    ]);
+    expect((retry.json() as { version: number }).version).toBe(2);
+
+    // Post-expiry: marker gone → re-evaluate (still a no-op here; base_version guards conflicts).
+    await ctx.pool.query(
+      `UPDATE gear_op_noop_ids
+       SET recorded_at = now() - make_interval(days => $2)
+       WHERE idempotency_key = $1`,
+      [freshKey, GEAR_OP_NOOP_RETENTION_DAYS + 1],
+    );
+    expect((await pruneExpiredNoopOpIds(ctx.pool)).deleted).toBeGreaterThanOrEqual(1);
+
+    await clearCooldown(ctx);
+    const afterExpiry = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(afterExpiry.statusCode).toBe(200);
+    const afterBody = afterExpiry.json() as {
+      applied: string[];
+      duplicates: string[];
+      version: number;
+    };
+    expect(afterBody.duplicates).toEqual([]);
+    expect(afterBody.applied).toEqual([freshNoopId]);
+    expect(afterBody.version).toBe(2);
+  });
+
+  it('prune_gear_op_noop_ids works as crusaderstrike_app with no guild (SECURITY DEFINER)', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+    const guildId = (
+      await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM gear_lists WHERE id = $1`, [
+        list.id,
+      ])
+    ).rows[0]!.guild_id;
+
+    const staleKey = `op:${randomUUID()}`;
+    const freshKey = `op:${randomUUID()}`;
+    await ctx.pool.query(
+      `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key, recorded_at) VALUES
+         ($1, $2, $3, now() - make_interval(days => $5)),
+         ($1, $2, $4, now())`,
+      [guildId, list.id, staleKey, freshKey, GEAR_OP_NOOP_RETENTION_DAYS + 1],
+    );
+
+    // One client: SET ROLE must stick for the prune call (pool.query would release).
+    const client = await ctx.pool.connect();
+    try {
+      await client.query(`SET ROLE crusaderstrike_app`);
+      await client.query(`SELECT set_config('app.guild_id', '', false)`);
+      const who = await client.query<{ current_user: string }>(`SELECT current_user`);
+      expect(who.rows[0]!.current_user).toBe('crusaderstrike_app');
+      const guildSetting = await client.query<{ v: string | null }>(
+        `SELECT nullif(current_setting('app.guild_id', true), '') AS v`,
+      );
+      expect(guildSetting.rows[0]!.v).toBeNull();
+
+      // Sanity: under FORCE RLS with no guild, the app role sees zero rows
+      // (and has no table DELETE — prune must go through SECURITY DEFINER).
+      const visible = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM gear_op_noop_ids WHERE idempotency_key = $1`,
+        [staleKey],
+      );
+      expect(Number(visible.rows[0]!.n)).toBe(0);
+      await expect(
+        client.query(`DELETE FROM gear_op_noop_ids WHERE idempotency_key = $1`, [staleKey]),
+      ).rejects.toThrow(/permission denied/i);
+
+      const pruned = await pruneExpiredNoopOpIds(client);
+      expect(pruned.deleted).toBeGreaterThanOrEqual(1);
+    } finally {
+      try {
+        await client.query(`RESET ROLE`);
+        await client.query(`SELECT set_config('app.guild_id', '', false)`);
+      } finally {
+        client.release();
+      }
+    }
+
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [staleKey]))
+        .rowCount,
+    ).toBe(0);
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [freshKey]))
+        .rowCount,
+    ).toBe(1);
+  });
+
+  it('write-path prune failure after COMMIT does not abort the noop save', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+
+    await clearCooldown(ctx);
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [{ op_id: randomUUID(), type: 'set_slot', slot: 'head', item_id: 16846, base_version: 1 }],
+      },
+    });
+
+    setPruneExpiredNoopOpIdsForTests(async () => {
+      throw new Error('forced prune failure');
+    });
+    resetWritePathPruneThrottleForTests();
+    try {
+      await clearCooldown(ctx);
+      const noopId = randomUUID();
+      const res = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/gear-lists/${list.id}/ops`,
+        headers: { cookie, 'x-csrf-token': csrf },
+        payload: {
+          ops: [
+            {
+              op_id: noopId,
+              type: 'set_slot',
+              slot: 'head',
+              item_id: 16846,
+              base_version: 2,
+            },
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { applied: string[]; version: number; duplicates: string[] };
+      expect(body.applied).toEqual([noopId]);
+      expect(body.duplicates).toEqual([]);
+      expect(body.version).toBe(2);
+      expect(
+        (
+          await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [
+            `op:${noopId}`,
+          ])
+        ).rowCount,
+      ).toBe(1);
+
+      // Direct schedule (same post-COMMIT helper) must also swallow the failure.
+      resetWritePathPruneThrottleForTests();
+      scheduleWritePathNoopPrune(ctx.pool, { log: () => undefined });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      setPruneExpiredNoopOpIdsForTests(null);
+      resetWritePathPruneThrottleForTests();
+    }
+  });
+
+  it('app role cannot delete non-expired noop rows via prune args', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+    const guildId = (
+      await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM gear_lists WHERE id = $1`, [
+        list.id,
+      ])
+    ).rows[0]!.guild_id;
+
+    const freshKey = `op:${randomUUID()}`;
+    await ctx.pool.query(
+      `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key, recorded_at)
+       VALUES ($1, $2, $3, now())`,
+      [guildId, list.id, freshKey],
+    );
+
+    const client = await ctx.pool.connect();
+    try {
+      await client.query(`SET ROLE crusaderstrike_app`);
+      await client.query(`SELECT set_config('app.guild_id', '', false)`);
+
+      // No p_now argument exists; shortest window still must not delete fresh rows.
+      const pruned = await pruneExpiredNoopOpIds(client, {
+        retentionDays: 1,
+        limit: 100000,
+      });
+      expect(pruned.deleted).toBe(0);
+
+      // days < 1 rejected inside the function
+      await expect(
+        client.query(`SELECT public.prune_gear_op_noop_ids(0, 100)`),
+      ).rejects.toThrow(/retention_days must be >= 1/i);
+
+      // 3-arg / infinity signature must not exist (dropped in 012)
+      await expect(
+        client.query(`SELECT public.prune_gear_op_noop_ids(1, 100, 'infinity'::timestamptz)`),
+      ).rejects.toThrow(/function public\.prune_gear_op_noop_ids/i);
+    } finally {
+      try {
+        await client.query(`RESET ROLE`);
+        await client.query(`SELECT set_config('app.guild_id', '', false)`);
+      } finally {
+        client.release();
+      }
+    }
+
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [freshKey]))
+        .rowCount,
+    ).toBe(1);
+  });
+
+  it('hourly prune tick: pool.connect failure is swallowed (no throw)', async () => {
+    const errors: unknown[] = [];
+    const fakePool = {
+      connect: async () => {
+        throw new Error('forced connect failure');
+      },
+    } as unknown as import('../src/db/pool.js').Pool;
+
+    await expect(
+      runNoopRetentionTick(fakePool, {
+        log: (msg, err) => {
+          if (err !== undefined) errors.push(err);
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(errors.length).toBe(1);
+    expect(String(errors[0])).toMatch(/forced connect failure/);
+  });
+
 
 
 });

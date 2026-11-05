@@ -420,6 +420,19 @@ If you cannot keep the previous key (compromise, lost key), deploy with only the
 ### Where the key is stored
 Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; never overwrite — append / rotate via `TOKEN_ENC_KEY_PREVIOUS`). Who can rotate: Platform Dev via Bot-approved deploy.
 
+
+## gear_op_noop_ids retention (platform#47)
+
+`gear_op_noop_ids` stores `op:<op_id>` markers for no-op `set_slot` / `clear_slot` so retries stay in `duplicates[]` without bumping `list.version`.
+
+| | |
+|---|---|
+| **Retention window** | **`GEAR_OP_NOOP_RETENTION_DAYS`** env (integer **1..3650**, **default 30**). Parsed in `src/config.ts` via `resolveRetentionDays`. |
+| **Rationale** | Addon `pending_ops` have **no TTL**; they stay in SavedVariables until the companion drains them. Default 30 days aligns with addon loot retention (≥30 days for un-uploaded drops). |
+| **After expiry** | A retry older than the window is **re-evaluated** (marker gone). Same slot state → applied as a fresh no-op (no version bump). If the list moved on, `base_version` yields `stale_base_version`. Neither case invents data; `base_version` remains the conflict guard. |
+| **Prune** | `SECURITY DEFINER` `public.prune_gear_op_noop_ids(days, limit)` owned by `crusaderstrike_migrate` (must already have **BYPASSRLS** from `initdb/01-roles.sh`; migration 012 does **not** `ALTER ROLE` and fails clearly if missing). Uses DB `now()` only (no caller timestamp). `SET search_path = pg_catalog, public, pg_temp` and schema-qualified `public.gear_op_noop_ids`. Hourly job: `pg_try_advisory_lock`, `FOR UPDATE SKIP LOCKED`, `pool.connect()` inside try/catch, destroy client if unlock fails, `stop()` awaits in-flight tick. Write-path prune **after COMMIT**, throttled once/minute/process. Index: `gear_op_noop_ids_recorded_at_idx` (012). |
+| **Ops note** | Rows also CASCADE when a list or guild is deleted. Zero-row prune passes log at debug. App role is **not** granted table `DELETE` (EXECUTE on the 2-arg function only). |
+
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.
 - Any paid DO change (resize, extra uptime checks, backups, Spaces) needs a price check with Bot first.

@@ -4,6 +4,7 @@ import { migrate } from './db/migrate.js';
 import { createBlizzardClient } from './blizzard/client.js';
 import { startMockBlizzard } from './blizzard/mock.js';
 import { buildApp } from './app.js';
+import { startNoopRetentionJob } from './gear/noop-retention.js';
 
 async function main() {
   const config = loadConfig();
@@ -34,6 +35,16 @@ async function main() {
   }
 
   const app = await buildApp({ config, pool, blizzard });
+  // Cheap in-process prune for gear_op_noop_ids (platform#47). No external cron.
+  const noopRetention =
+    config.NODE_ENV === 'test'
+      ? null
+      : startNoopRetentionJob(pool, {
+          retentionDays: config.GEAR_OP_NOOP_RETENTION_DAYS,
+        });
+  app.addHook('onClose', async () => {
+    await noopRetention?.stop();
+  });
   await app.listen({ port: config.PORT, host: '0.0.0.0' });
 }
 

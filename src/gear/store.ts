@@ -160,9 +160,9 @@ export async function countItems(db: Db, listId: string): Promise<number> {
 
 /**
  * Record a no-op op_id so retries stay deduped without bumping list.version.
- * Retention: gear_op_noop_ids has no TTL yet (rows are tiny; CASCADE on list/guild delete).
- * Align periodic cleanup with gear_list_events retention in a follow-up — do not let it
- * grow unbounded without a plan.
+ * Retention: GEAR_OP_NOOP_RETENTION_DAYS (default 30; platform#47). CASCADE on
+ * list/guild delete still applies. Prune is NEVER called here — it must run after
+ * COMMIT (see scheduleWritePathNoopPrune) so a prune failure cannot abort the write txn.
  */
 async function recordNoopOpId(
   db: Db,

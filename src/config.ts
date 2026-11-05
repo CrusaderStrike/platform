@@ -7,6 +7,10 @@ import {
   type BlizzardRegion,
 } from './blizzard/regions.js';
 import { validateTokenEncKey } from './lib/crypto.js';
+import {
+  GEAR_OP_NOOP_RETENTION_DAYS_DEFAULT,
+  resolveRetentionDays,
+} from './gear/noop-retention.js';
 
 const bool = z
   .union([z.boolean(), z.string()])
@@ -54,6 +58,11 @@ const envSchema = z.object({
    * the default is wrong for the host network.
    */
   TRUSTED_PROXY: z.string().default('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'),
+  /**
+   * Days to keep gear_op_noop_ids markers for idempotent set_slot/clear_slot retries.
+   * Integer 1..3650. Default 30. See docs/runbook.md § gear_op_noop_ids retention.
+   */
+  GEAR_OP_NOOP_RETENTION_DAYS: z.string().optional(),
 });
 
 export type Config = {
@@ -83,6 +92,8 @@ export type Config = {
   cookieSecure: boolean;
   /** Fastify trustProxy value: false | true | CIDR list. */
   trustProxy: boolean | string[];
+  /** Days to retain gear_op_noop_ids rows (validated 1..3650). */
+  GEAR_OP_NOOP_RETENTION_DAYS: number;
 };
 
 function isProdEnv(nodeEnv: string, appEnv?: string): boolean {
@@ -176,6 +187,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     v.COOKIE_SECURE ??
     (production || v.PUBLIC_WEB_ORIGIN.startsWith('https://'));
   const trustProxy = parseTrustedProxy(v.TRUSTED_PROXY);
+  let gearOpNoopRetentionDays: number;
+  try {
+    gearOpNoopRetentionDays = resolveRetentionDays(
+      v.GEAR_OP_NOOP_RETENTION_DAYS,
+      GEAR_OP_NOOP_RETENTION_DAYS_DEFAULT,
+    );
+  } catch (err) {
+    throw new Error(`Invalid configuration: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   return {
     NODE_ENV: v.NODE_ENV,
@@ -200,5 +220,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     corsOrigins,
     cookieSecure,
     trustProxy,
+    GEAR_OP_NOOP_RETENTION_DAYS: gearOpNoopRetentionDays,
   };
 }
