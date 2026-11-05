@@ -212,8 +212,9 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
 8. Build & start the API **before** pointing Caddy at it. Bake the short git sha into the image (`Dockerfile` `ARG`/`ENV` `BUILD_SHA` → `/healthz.sha` only; no other build metadata):
    ```
    cd /opt/crusaderstrike
-   BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD) \
-     docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+   BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD)
+   : "${BUILD_SHA:?set BUILD_SHA to short git sha}"
+   BUILD_SHA="$BUILD_SHA" docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
    docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
    # Wait until healthy:
    docker inspect -f '{{.State.Health.Status}}' crusaderstrike-api-1   # expect healthy
@@ -232,7 +233,7 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    } >> /root/image-digests.log
    ```
 11. Smoke:
-   - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true,"sha":"<short sha>"}` (sha from image `BUILD_SHA`; `"unknown"` if the image was built without the build-arg)
+   - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true,"sha":"<short sha>"}` (sha from image `BUILD_SHA`, validated as `/^[0-9a-f]{7,40}$/` at startup; `"unknown"` if missing/invalid — prod builds must set BUILD_SHA)
    - Login Location smoke (client_id must be 32 chars and must not contain a comma / `%2C`):
      ```
      loc=$(curl -sS -D - -o /dev/null https://api.crusaderstrike.com/api/v1/auth/blizzard/login \
@@ -261,8 +262,9 @@ Always run First deploy step 6 (backup + `/root/image-digests.log` pin + `docker
 ```
 cd /opt/crusaderstrike
 # step 6 (backup + pin + tag) goes HERE first
-BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD) \
-  docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD)
+: "${BUILD_SHA:?set BUILD_SHA to short git sha}"
+BUILD_SHA="$BUILD_SHA" docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
 # wait healthy, then smoke /healthz + CORS single-header check
 curl -fsS https://api.crusaderstrike.com/healthz

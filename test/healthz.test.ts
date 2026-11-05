@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, normalizeBuildSha } from '../src/config.js';
 import {
   shutdownEmbeddedPg,
   startTestApp,
@@ -47,9 +47,36 @@ describe('/healthz build sha (platform#49)', () => {
       expect(body).not.toHaveProperty('env');
       expect(body).not.toHaveProperty('node');
     });
+
+    it('serves unknown when BUILD_SHA is a secret-looking string', async () => {
+      ctx = await startTestApp({ buildSha: 'sk_live_not_a_git_sha_at_all' });
+      expect(ctx.config.BUILD_SHA).toBe('unknown');
+      const res = await ctx.app.inject({ method: 'GET', url: '/healthz' });
+      expect(res.json()).toEqual({ ok: true, sha: 'unknown' });
+    });
   });
 
-  it('loadConfig trims BUILD_SHA and treats blank as unknown', () => {
+  it('normalizeBuildSha / loadConfig accept only lowercase hex 7–40', () => {
+    expect(normalizeBuildSha(undefined)).toBe('unknown');
+    expect(normalizeBuildSha('')).toBe('unknown');
+    expect(normalizeBuildSha('  ')).toBe('unknown');
+    expect(normalizeBuildSha('1089acd')).toBe('1089acd');
+    expect(normalizeBuildSha('  abcdef0  ')).toBe('abcdef0');
+    expect(normalizeBuildSha('a'.repeat(40))).toBe('a'.repeat(40));
+    // too short
+    expect(normalizeBuildSha('abc123')).toBe('unknown');
+    // too long
+    expect(normalizeBuildSha('a'.repeat(41))).toBe('unknown');
+    // uppercase / mixed
+    expect(normalizeBuildSha('1089ACD')).toBe('unknown');
+    expect(normalizeBuildSha('1089AcD')).toBe('unknown');
+    // garbage
+    expect(normalizeBuildSha('not-a-sha!')).toBe('unknown');
+    expect(normalizeBuildSha('g123456')).toBe('unknown');
+    // secret-looking
+    expect(normalizeBuildSha('sk_live_abc123def456')).toBe('unknown');
+    expect(normalizeBuildSha('postgres://user:pass@host/db')).toBe('unknown');
+
     const base = {
       NODE_ENV: 'test',
       DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db',
@@ -59,7 +86,10 @@ describe('/healthz build sha (platform#49)', () => {
     } as NodeJS.ProcessEnv;
 
     expect(loadConfig(base).BUILD_SHA).toBe('unknown');
-    expect(loadConfig({ ...base, BUILD_SHA: '  ' }).BUILD_SHA).toBe('unknown');
-    expect(loadConfig({ ...base, BUILD_SHA: ' abc123 ' }).BUILD_SHA).toBe('abc123');
+    expect(loadConfig({ ...base, BUILD_SHA: '' }).BUILD_SHA).toBe('unknown');
+    expect(loadConfig({ ...base, BUILD_SHA: 'SK_LIVE_SECRET' }).BUILD_SHA).toBe('unknown');
+    expect(loadConfig({ ...base, BUILD_SHA: 'DEADBEE' }).BUILD_SHA).toBe('unknown');
+    expect(loadConfig({ ...base, BUILD_SHA: '!!garbage!!' }).BUILD_SHA).toBe('unknown');
+    expect(loadConfig({ ...base, BUILD_SHA: '1089acd' }).BUILD_SHA).toBe('1089acd');
   });
 });
