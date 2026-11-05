@@ -13,6 +13,8 @@ export { normalizeRealm, normalizeRealmSql };
 export const GEAR_SCHEMA_VERSION = 1;
 export const MAX_LISTS_PER_CHARACTER = 5;
 export const MAX_OPS_PER_REQUEST = 200;
+/** Cap on sum of ops across all lists in one /sync body. */
+export const MAX_SYNC_TOTAL_OPS = 500;
 export const MAX_SYNC_BYTES = 1_048_576;
 export const MAX_LIST_NAME = 64;
 export const MAX_NOTE = 200;
@@ -267,6 +269,14 @@ export function parseSyncBody(
       if (p.ignored.length) bucket.ignored.push({ op_id: p.op.op_id, keys: p.ignored });
     }
     lists.push(...byList.values());
+  }
+
+  const totalOps = lists.reduce((n, l) => n + l.ops.length, 0);
+  if (totalOps > MAX_SYNC_TOTAL_OPS) {
+    return {
+      ok: false,
+      fieldErrors: { ops: `Too many ops across lists (max ${MAX_SYNC_TOTAL_OPS}).` },
+    };
   }
 
   return {

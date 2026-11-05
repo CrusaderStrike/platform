@@ -659,7 +659,8 @@ describe('gear lists (platform#17)', () => {
   });
 
 
-  it('allows several web edits ~1s apart under the 60/min write limit', async () => {
+
+  it('allows ~10 back-to-back gear writes; 61st in the minute returns 429 Retry-After', async () => {
     const { cookie, csrf } = await signIn(ctx);
     const characterId = await selectMain(ctx, cookie, csrf);
     await clearCooldown(ctx);
@@ -667,14 +668,20 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Timed' },
+      payload: { name: 'Burst' },
     });
     expect(created.statusCode).toBe(201);
     const list = created.json() as { id: string; version: number };
     let version = list.version;
-    // Do not clear cooldown: wait ~1.1s between writes so each stays under ~60/min.
-    for (let i = 0; i < 3; i++) {
-      await new Promise((r) => setTimeout(r, 1100));
+    const owner = await ctx.pool.query<{ owner_user_id: string }>(
+      `SELECT owner_user_id FROM gear_lists WHERE id = $1`,
+      [list.id],
+    );
+    const userId = owner.rows[0]!.owner_user_id;
+
+    // Reset so the burst is measured cleanly; 10 ops with no wait must all be 200.
+    await clearCooldown(ctx);
+    for (let i = 0; i < 10; i++) {
       const op = await ctx.app.inject({
         method: 'POST',
         url: `/api/v1/gear-lists/${list.id}/ops`,
@@ -685,7 +692,7 @@ describe('gear lists (platform#17)', () => {
               op_id: randomUUID(),
               type: 'add_item',
               slot: 'trinket1',
-              item_id: 2000 + i,
+              item_id: 3000 + i,
               priority: 1,
               base_version: version,
             },
@@ -695,15 +702,36 @@ describe('gear lists (platform#17)', () => {
       expect(op.statusCode).toBe(200);
       version = (op.json() as { version: number }).version;
     }
-    await new Promise((r) => setTimeout(r, 1100));
-    const patch = await ctx.app.inject({
-      method: 'PATCH',
-      url: `/api/v1/gear-lists/${list.id}`,
-      headers: { cookie, 'x-csrf-token': csrf, 'if-match': `"v${version}"` },
-      payload: { name: 'Timed v2' },
+
+    // Simulate the 60th write already consumed in this minute; the next is the 61st.
+    await ctx.pool.query(
+      `UPDATE gear_write_rate_limits SET write_count = 60, window_start = now() WHERE user_id = $1`,
+      [userId],
+    );
+
+    const limited = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: randomUUID(),
+            type: 'add_item',
+            slot: 'trinket2',
+            item_id: 9999,
+            priority: 1,
+            base_version: version,
+          },
+        ],
+      },
     });
-    expect(patch.statusCode).toBe(200);
-  }, 20_000);
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ error: { code: 'rate_limited' } });
+    const retryAfter = limited.headers['retry-after'];
+    expect(retryAfter).toBeDefined();
+    expect(Number(retryAfter)).toBeGreaterThan(0);
+  });
 
   it('parallel ops/PATCH/create serialize without 500 and respect 5-list cap', async () => {
     const { cookie, csrf } = await signIn(ctx);
@@ -740,12 +768,10 @@ describe('gear lists (platform#17)', () => {
         }),
       ),
     );
+    // Limiter disabled via clearCooldown; lock path only — no 429.
     for (const r of opResults) {
-      expect([200, 429]).toContain(r.statusCode);
-      expect(r.statusCode).not.toBe(500);
+      expect(r.statusCode).toBe(200);
     }
-    const okOps = opResults.filter((r) => r.statusCode === 200);
-    expect(okOps.length).toBeGreaterThan(0);
 
     await clearCooldown(ctx);
     const get = await ctx.app.inject({
@@ -771,8 +797,7 @@ describe('gear lists (platform#17)', () => {
       }),
     ]);
     for (const r of patchResults) {
-      expect([200, 409, 429]).toContain(r.statusCode);
-      expect(r.statusCode).not.toBe(500);
+      expect([200, 409]).toContain(r.statusCode);
     }
     expect(patchResults.some((r) => r.statusCode === 200)).toBe(true);
 
@@ -789,8 +814,7 @@ describe('gear lists (platform#17)', () => {
       ),
     );
     for (const r of createResults) {
-      expect([201, 409, 429]).toContain(r.statusCode);
-      expect(r.statusCode).not.toBe(500);
+      expect([201, 409]).toContain(r.statusCode);
     }
     const listed = await ctx.app.inject({
       method: 'GET',

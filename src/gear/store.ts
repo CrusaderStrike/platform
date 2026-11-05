@@ -300,15 +300,7 @@ export async function patchListMeta(
     name = args.name;
   }
   if (args.visibility !== undefined && args.visibility !== locked.visibility) {
-    // Rename and visibility change in one PATCH: emit rename first if both, else visibility as rename payload extension.
-    // Prefer a single GearListRenamed-or-visibility event: use GearListRenamed when name changes,
-    // otherwise encode visibility-only as GearListRenamed payload { visibility } is wrong.
-    // Spec: visibility changes are metadata; record as GearListRenamed only for name.
-    // For visibility-only, append GearListRenamed is incorrect — use payload on a dedicated approach:
-    // We'll emit GearListRenamed for name and a second seq for visibility via GearListCreated-style.
-    // Simplest accepted approach: visibility-only emits GearListRenamed with { visibility } is nonstandard.
-    // Per data-model, only GearListRenamed/Deleted for meta. Fold visibility into rename payload when both,
-    // and when visibility-only emit GearListRenamed with { name: same, visibility }.
+    // Fold visibility into GearListRenamed (with name when both change; name+visibility when visibility-only).
     if (eventType === 'GearListRenamed') {
       payload = { ...payload, visibility: args.visibility };
     } else {
@@ -931,29 +923,43 @@ export function serializeEvent(ev: GearEventRow): Record<string, unknown> {
   };
 }
 
-/** ~60 writes/min (1s min interval). Separate bucket from uploads. */
-export const GEAR_WRITE_COOLDOWN_MS = 1_000;
+/** Max gear writes per user per rolling 60s window (no minimum interval between writes). */
+export const GEAR_WRITE_LIMIT_PER_MIN = 60;
+export const GEAR_WRITE_WINDOW_MS = 60_000;
 
 export async function checkGearWriteRateLimit(
   db: Db,
   userId: string,
 ): Promise<{ ok: true } | { ok: false; retryAfterSec: number }> {
-  const row = await db.query<{ last_at: Date }>(
-    `SELECT last_at FROM gear_write_rate_limits WHERE user_id = $1`,
+  const row = await db.query<{ window_start: Date; write_count: number }>(
+    `SELECT window_start, write_count FROM gear_write_rate_limits WHERE user_id = $1`,
     [userId],
   );
-  const last = row.rows[0]?.last_at;
-  if (last) {
-    const retryAfter = Math.ceil((last.getTime() + GEAR_WRITE_COOLDOWN_MS - Date.now()) / 1000);
-    if (retryAfter > 0) return { ok: false, retryAfterSec: retryAfter };
-  }
-  return { ok: true };
+  const cur = row.rows[0];
+  if (!cur) return { ok: true };
+  const elapsed = Date.now() - cur.window_start.getTime();
+  if (elapsed >= GEAR_WRITE_WINDOW_MS) return { ok: true };
+  if (cur.write_count < GEAR_WRITE_LIMIT_PER_MIN) return { ok: true };
+  const retryAfter = Math.max(1, Math.ceil((GEAR_WRITE_WINDOW_MS - elapsed) / 1000));
+  return { ok: false, retryAfterSec: retryAfter };
 }
 
+/** Record one successful gear write against the rolling 60/min bucket. */
 export async function touchGearWriteRateLimit(db: Db, userId: string): Promise<void> {
   await db.query(
-    `INSERT INTO gear_write_rate_limits (user_id, last_at) VALUES ($1, now())
-     ON CONFLICT (user_id) DO UPDATE SET last_at = now()`,
+    `INSERT INTO gear_write_rate_limits (user_id, window_start, write_count)
+     VALUES ($1, now(), 1)
+     ON CONFLICT (user_id) DO UPDATE SET
+       window_start = CASE
+         WHEN gear_write_rate_limits.window_start <= now() - interval '60 seconds'
+           THEN now()
+         ELSE gear_write_rate_limits.window_start
+       END,
+       write_count = CASE
+         WHEN gear_write_rate_limits.window_start <= now() - interval '60 seconds'
+           THEN 1
+         ELSE gear_write_rate_limits.write_count + 1
+       END`,
     [userId],
   );
 }
@@ -965,4 +971,3 @@ export async function clearGearWriteRateLimit(db: Db, userId?: string): Promise<
     await db.query(`DELETE FROM gear_write_rate_limits`);
   }
 }
-

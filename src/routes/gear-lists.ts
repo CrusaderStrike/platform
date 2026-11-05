@@ -41,6 +41,15 @@ function requireUuid(id: string, field: string): void {
   }
 }
 
+/** Character ids are opaque TEXT (not UUIDs); reject empty / oversized / control chars. */
+function requireCharacterId(id: string): void {
+  if (!id || id.length > 128 || /[\u0000-\u001f]/.test(id)) {
+    throw new AppError(400, 'validation_error', 'Invalid character_id.', {
+      character_id: 'Required, max 128 chars, no control characters.',
+    });
+  }
+}
+
 function requireOwnedCharacter(
   selection: { main_id: string; alt_ids: string[] } | null,
   characterId: string,
@@ -73,7 +82,7 @@ async function requireGearWriteRate(
   reply: FastifyReply,
   userId: string,
 ): Promise<void> {
-  // ~60 writes/min (1s min interval). Further burst/tuning → follow-up.
+  // ~60 writes/min rolling bucket (no minimum interval). Further tuning → follow-up.
   const rate = await gear.checkGearWriteRateLimit(pool, userId);
   if (!rate.ok) {
     reply.header('Retry-After', String(rate.retryAfterSec));
@@ -90,6 +99,7 @@ export async function registerGearListRoutes(
   app.get('/api/v1/characters/:character_id/gear-lists', async (req) => {
     const s = requireSession(req);
     const characterId = (req.params as { character_id: string }).character_id;
+    requireCharacterId(characterId);
     const selection = await authStore.getSelection(pool, s.userId);
     requireOwnedCharacter(selection, characterId);
     const owned = await authStore.getCharacterForUser(pool, s.userId, characterId);
@@ -123,6 +133,7 @@ export async function registerGearListRoutes(
     requireCsrf(req);
     const s = requireSession(req);
     const characterId = (req.params as { character_id: string }).character_id;
+    requireCharacterId(characterId);
     await requireGearWriteRate(pool, reply, s.userId);
     const selection = await authStore.getSelection(pool, s.userId);
     requireOwnedCharacter(selection, characterId);
@@ -250,6 +261,8 @@ export async function registerGearListRoutes(
       if (!gear.canWriteList(list, s.userId)) {
         throw new AppError(403, 'forbidden', 'Only the list owner can edit.');
       }
+      const selection = await authStore.getSelection(pool, s.userId);
+      requireOwnedCharacter(selection, list.character_id);
       const result = await gear.patchListMeta(client, {
         list,
         expectedVersion: expected,
@@ -305,6 +318,8 @@ export async function registerGearListRoutes(
       if (!gear.canWriteList(list, s.userId)) {
         throw new AppError(403, 'forbidden', 'Only the list owner can delete.');
       }
+      const selection = await authStore.getSelection(pool, s.userId);
+      requireOwnedCharacter(selection, list.character_id);
       const result = await gear.deleteList(client, {
         list,
         expectedVersion: expected,
@@ -471,6 +486,7 @@ export async function registerGearListRoutes(
 
     let owned: { id: string; character_name: string; realm: string | null } | null = null;
     if (envelope.characterId) {
+      requireCharacterId(envelope.characterId);
       if (!selected.has(envelope.characterId)) {
         throw new AppError(403, 'forbidden', 'Character is not in your selection.');
       }
@@ -498,7 +514,11 @@ export async function registerGearListRoutes(
       await client.query('BEGIN');
       await gear.setTenant(client, guildId);
       const gearResults = [];
-      for (const entry of envelope.lists) {
+      // Sort by list_id so concurrent /sync never deadlock on lock order.
+      const sortedLists = [...envelope.lists].sort((a, b) =>
+        a.list_id < b.list_id ? -1 : a.list_id > b.list_id ? 1 : 0,
+      );
+      for (const entry of sortedLists) {
         const sp = `sp_sync_${entry.list_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)}`;
         await client.query(`SAVEPOINT ${sp}`);
         try {
