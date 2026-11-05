@@ -911,7 +911,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: `list_limit_reached` (cap 20) or `character_not_displayed`.
+          description: '`list_limit_reached` (cap 20) or `character_not_displayed`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1476,10 +1476,19 @@ components:
       schema: { type: integer }
   responses:
     ValidationError:
-      description: Validation failed.
+      description: |
+        Validation failed. Field-level errors map (not the `Error` envelope). A body that is
+        not valid JSON returns `errors.body: invalid_json` — a field-error value, not an
+        `error.code` — plus an optional top-level human-readable `message` (platform#56).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ValidationErrors' }
+          examples:
+            field_errors:
+              value: { errors: { name: required } }
+            invalid_json:
+              summary: Malformed JSON request body
+              value: { errors: { body: invalid_json }, message: Request body is not valid JSON. }
     UnsupportedMediaType:
       description: Body must be application/json.
       content:
@@ -1564,7 +1573,12 @@ components:
             details:
               type: object
               additionalProperties: true
-              description: Optional non-sensitive structured details, e.g. `{ limit: 20 }` on `list_limit_reached` (platform#53).
+              description: 'Optional non-sensitive structured details, e.g. `{ limit: 20 }` on `list_limit_reached` (platform#53).'
+              properties:
+                limit:
+                  type: integer
+                  minimum: 1
+                  description: Present on `list_limit_reached` — the per-character cap that was hit (currently 20).
     ValidationErrors:
       type: object
       description: Field-level validation errors (`errors` map of field → message).
@@ -1573,6 +1587,10 @@ components:
         errors:
           type: object
           additionalProperties: { type: string }
+          description: 'Field → error value (e.g. `required`, `invalid_slot`, or `body: invalid_json`).'
+        message:
+          type: string
+          description: Optional safe human-readable summary (e.g. on `invalid_json`); clients should prefer it over raw field values when present.
     PageMeta:
       type: object
       required: [next_cursor]
