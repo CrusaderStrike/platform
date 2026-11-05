@@ -146,9 +146,13 @@ export async function countItems(db: Db): Promise<number> {
   return Number(res.rows[0]?.n ?? 0);
 }
 
+/**
+ * True only after a completed import wrote forever_items_meta (setMeta).
+ * Mid-import upserts must not turn on item_not_forever enforcement.
+ */
 export async function catalogIsActive(db: Db): Promise<boolean> {
-  const n = await countItems(db);
-  return n > 0;
+  const meta = await getMeta(db);
+  return meta.build_id !== 'empty';
 }
 
 export async function itemExists(db: Db, itemId: number): Promise<boolean> {
@@ -230,6 +234,11 @@ export async function setMeta(
   );
 }
 
+function escapeLikePattern(raw: string): string {
+  // Escape \, %, and _ so user q is a literal substring under LIKE.
+  return raw.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 export async function listItems(
   db: Db,
   filters: ListItemsFilters,
@@ -247,8 +256,8 @@ export async function listItems(
     where.push(`armor_type = $${params.length}`);
   }
   if (filters.q && filters.q.trim()) {
-    params.push(`%${filters.q.trim().toLowerCase()}%`);
-    where.push(`lower(name) LIKE $${params.length}`);
+    params.push(`%${escapeLikePattern(filters.q.trim().toLowerCase())}%`);
+    where.push(`lower(name) LIKE $${params.length} ESCAPE '\\'`);
   }
   if (filters.minItemLevel != null) {
     params.push(filters.minItemLevel);

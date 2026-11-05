@@ -279,4 +279,88 @@ describe('Forever items catalog', () => {
     expect(second).toBe(first);
     expect(first).toBeGreaterThanOrEqual(3);
   });
+
+  it('returns invalid_slot field detail for a bad slot', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=hat' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      errors: { slot: 'invalid_slot' },
+    });
+  });
+
+  it('treats LIKE metacharacters in q as literals', async () => {
+    await items.upsertItem(ctx.pool, {
+      itemId: 90001,
+      name: '100% Crit Ring_of_Binding',
+      slot: 'finger1',
+      slotAliases: ['finger2'],
+      inventoryType: 'FINGER',
+      quality: 'epic',
+      itemLevel: 70,
+      requiredLevel: 60,
+      armorType: null,
+      itemClass: 4,
+      itemSubclass: 0,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    await items.upsertItem(ctx.pool, {
+      itemId: 90002,
+      name: 'Plain Crit Ring',
+      slot: 'finger1',
+      slotAliases: ['finger2'],
+      inventoryType: 'FINGER',
+      quality: 'rare',
+      itemLevel: 60,
+      requiredLevel: 50,
+      armorType: null,
+      itemClass: 4,
+      itemSubclass: 0,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    await items.setMeta(ctx.pool, { buildId: 'like-escape', itemCount: 2, region: 'us' });
+    const pct = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/items?q=' + encodeURIComponent('100% Crit'),
+    });
+    expect(pct.statusCode).toBe(200);
+    const pctIds = (pct.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+    expect(pctIds).toContain(90001);
+    expect(pctIds).not.toContain(90002);
+
+    const under = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/items?q=' + encodeURIComponent('Ring_of'),
+    });
+    expect(under.statusCode).toBe(200);
+    const underIds = (under.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+    expect(underIds).toEqual([90001]);
+  });
+
+  it('returns 429 when the public items bucket is exhausted', async () => {
+    const { hashIp } = await import('../src/guilds/rate-limit.js');
+    await ctx.pool.query(`DELETE FROM public_api_rate_limits WHERE bucket = 'items'`);
+    await ctx.pool.query(
+      `INSERT INTO public_api_rate_limits (ip_hash, bucket, window_start, hit_count)
+       VALUES ($1, 'items', now(), 240)`,
+      [hashIp('127.0.0.1')],
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/items' });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBeTruthy();
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+    expect(res.json().error.code).toBe('rate_limited');
+    expect(res.headers['ratelimit-remaining']).toBe('0');
+
+    const detail = await ctx.app.inject({ method: 'GET', url: '/api/v1/items/19019' });
+    expect(detail.statusCode).toBe(429);
+
+    const search = await ctx.app.inject({ method: 'GET', url: '/api/v1/items/search' });
+    expect(search.statusCode).toBe(429);
+  });
 });

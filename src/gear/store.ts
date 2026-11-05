@@ -473,7 +473,9 @@ export async function applyOps(
       continue;
     }
 
-    if (!(await foreverCheck(op.item_id))) {
+    // Allowlist gates ops that introduce an item reference (add_item). Mutations of
+    // rows already on the list must still work if the id is absent from forever_items.
+    if (op.type === 'add_item' && !(await foreverCheck(op.item_id))) {
       // Forever reject still consumes a seq + bumps list.version so later writes don't collide.
       version += 1;
       await appendEvent(db, {

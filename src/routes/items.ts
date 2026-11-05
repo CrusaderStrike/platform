@@ -4,10 +4,33 @@ import { AppError } from '../lib/errors.js';
 import { GEAR_SLOTS, type GearSlot } from '../gear/schema.js';
 import { isArmorType, isGearSlot } from '../items/mapping.js';
 import * as items from '../items/store.js';
+import { checkPublicRateLimit } from '../guilds/rate-limit.js';
 
 export type ItemsRouteDeps = { pool: Pool };
 
 const CACHE_CONTROL = 'public, max-age=300';
+
+function setRateHeaders(
+  reply: FastifyReply,
+  rate: Awaited<ReturnType<typeof checkPublicRateLimit>>,
+): void {
+  reply.header('RateLimit-Limit', String(rate.limit));
+  reply.header('RateLimit-Remaining', String(rate.remaining));
+  reply.header('RateLimit-Reset', String(rate.resetSec));
+}
+
+async function enforceItemsRate(
+  pool: Pool,
+  req: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const rate = await checkPublicRateLimit(pool, req.ip || 'unknown', 'items');
+  setRateHeaders(reply, rate);
+  if (!rate.allowed) {
+    reply.header('Retry-After', String(rate.retryAfterSec));
+    throw new AppError(429, 'rate_limited', 'Too many requests. Try again shortly.');
+  }
+}
 
 function maybe304(req: FastifyRequest, reply: FastifyReply, etag: string): boolean {
   const inm = req.headers['if-none-match'];
@@ -50,7 +73,7 @@ function parseSlot(raw: unknown): GearSlot | undefined {
   const v = String(raw);
   if (!isGearSlot(v)) {
     throw new AppError(400, 'validation_error', 'Invalid slot.', {
-      slot: `Must be one of: ${GEAR_SLOTS.join(', ')}.`,
+      slot: 'invalid_slot',
     });
   }
   return v;
@@ -76,6 +99,7 @@ export async function registerItemsRoutes(
   const { pool } = deps;
 
   const listHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+    await enforceItemsRate(pool, req, reply);
     const q = req.query as Record<string, unknown>;
     const slot = parseSlot(q.slot);
     const armorType = parseArmorClass(q);
@@ -134,6 +158,7 @@ export async function registerItemsRoutes(
   app.get('/api/v1/items/search', listHandler);
 
   app.get('/api/v1/items/:item_id', async (req, reply) => {
+    await enforceItemsRate(pool, req, reply);
     const params = req.params as { item_id: string };
     const itemId = Number(params.item_id);
     if (!Number.isInteger(itemId) || itemId < 1) {

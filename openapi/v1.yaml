@@ -1058,7 +1058,11 @@ paths:
           schema: { $ref: '#/components/schemas/GearSlot' }
         - name: class
           in: query
-          description: Armor type filter (alias of armor_type)
+          description: Armor type filter (alias of `armor_type`)
+          schema: { type: string, enum: [cloth, leather, mail, plate] }
+        - name: armor_type
+          in: query
+          description: Armor type filter (alias of `class`)
           schema: { type: string, enum: [cloth, leather, mail, plate] }
         - name: q
           in: query
@@ -1094,6 +1098,7 @@ paths:
         '304':
           description: Not modified (If-None-Match)
         '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /items/search:
     get:
@@ -1107,6 +1112,11 @@ paths:
           schema: { $ref: '#/components/schemas/GearSlot' }
         - name: class
           in: query
+          description: Armor type filter (alias of `armor_type`)
+          schema: { type: string, enum: [cloth, leather, mail, plate] }
+        - name: armor_type
+          in: query
+          description: Armor type filter (alias of `class`)
           schema: { type: string, enum: [cloth, leather, mail, plate] }
         - name: q
           in: query
@@ -1136,6 +1146,7 @@ paths:
         '304':
           description: Not modified
         '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /items/{item_id}:
     get:
@@ -1160,6 +1171,7 @@ paths:
           description: Not modified
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /sync/savedvariables:
     post:
@@ -1928,7 +1940,8 @@ components:
       type: object
       description: |
         Wishlist item. Uses **snake_case** `item_id` (equipped gear keeps camelCase `itemId`).
-        `icon_url` is always null until Blizzard documents a Forever static media namespace.
+        `icon_url` on wishlist projections may still be null; Forever item icons live on
+        `ForeverItem.icon_url` from `GET /items` (Item Media via `static-forever-{region}`).
       required: [slot, item_id, priority, obtained]
       properties:
         slot: { $ref: '#/components/schemas/GearSlot' }
@@ -1938,7 +1951,9 @@ components:
         obtained: { type: boolean }
         obtained_at: { type: [string, 'null'], format: date-time }
         obtained_run_id: { type: [string, 'null'], format: uuid }
-        icon_url: { type: 'null', description: Always null for now (Forever media namespace undocumented). }
+        icon_url:
+          type: [string, 'null']
+          description: Optional HTTPS render.worldofwarcraft.com URL when resolved; often null on wishlist rows.
     GearList:
       type: object
       required: [id, character_id, owner_user_id, name, visibility, version, updated_at, items]

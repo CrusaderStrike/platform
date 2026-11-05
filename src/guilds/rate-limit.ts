@@ -1,11 +1,13 @@
 import type { Pool } from '../db/pool.js';
 import { createHash } from 'node:crypto';
 
-export type PublicRateBucket = 'list_detail' | 'sitemap';
+export type PublicRateBucket = 'list_detail' | 'sitemap' | 'items';
 
 const LIMITS: Record<PublicRateBucket, { limit: number; windowSec: number }> = {
   list_detail: { limit: 120, windowSec: 60 },
   sitemap: { limit: 30, windowSec: 60 },
+  /** Generous public catalog reads (contract §2.4). */
+  items: { limit: 240, windowSec: 60 },
 };
 
 export function hashIp(ip: string): string {
