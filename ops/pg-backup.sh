@@ -9,7 +9,9 @@ AGE_PUB=/opt/crusaderstrike/backup-age.pub # age public recipient only; the priv
 DIR=/var/backups/crusaderstrike/offsite
 set -a; . "$ENV"; set +a
 # Healthchecks.io: HC_PING_URL (in backup.env, not git) gets a ping on success and /fail on failure.
-hc() { [ -n "${HC_PING_URL:-}" ] && curl -fsS -m 10 --retry 3 -o /dev/null "$HC_PING_URL$1" || true; }
+# The URL is a secret: pass it to curl on stdin via -K - so it never appears in argv / ps.
+hc() { [ -n "${HC_PING_URL:-}" ] || return 0
+  printf 'url = "%s%s"\n' "$HC_PING_URL" "$1" | curl -fsS -m 10 --retry 3 -o /dev/null -K - || true; }
 trap 'rc=$?; [ $rc -ne 0 ] && hc /fail' EXIT
 : "${SPACES_BUCKET:?}" "${SPACES_REGION:?}" "${SPACES_KEY:?}" "${SPACES_SECRET:?}"
 # (Re)write the s3cmd config from backup.env; never pass keys on the command line.
