@@ -4,14 +4,21 @@ import { AppError } from '../lib/errors.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
 import * as authStore from '../auth/store.js';
 import {
+  GEAR_SLOTS,
   MAX_LIST_NAME,
   MAX_OPS_PER_REQUEST,
   MAX_SYNC_BYTES,
+  type GearSlot,
   parseOp,
   parseSyncBody,
   type GearSource,
 } from '../gear/schema.js';
 import * as gear from '../gear/store.js';
+import {
+  parseRoleSpec,
+  parseSetType,
+  validateSetLevelRules,
+} from '../gear/set-meta.js';
 import * as foreverItems from '../items/store.js';
 
 export type GearListDeps = { pool: Pool };
@@ -51,15 +58,18 @@ function requireCharacterId(id: string): void {
   }
 }
 
-function requireOwnedCharacter(
+/**
+ * Until display-set (#41) lands, main/alt selection is the display gate.
+ * Hidden / unselected characters → 409 character_not_displayed (contract §2.2).
+ */
+function requireDisplayedCharacter(
   selection: { main_id: string; alt_ids: string[] } | null,
   characterId: string,
 ): void {
   const selected = gear.selectedCharacterIds(selection);
   if (!selected.has(characterId)) {
-    throw new AppError(403, 'forbidden', 'Character is not in your selection.', {
-      character_id: 'Must be your selected main or an alt.',
-    });
+    // No fields — clients key off error.code character_not_displayed.
+    throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
   }
 }
 
@@ -91,6 +101,50 @@ async function requireGearWriteRate(
   }
 }
 
+
+async function assertForeverSlotItem(
+  pool: Pool,
+  itemId: number,
+  slot: GearSlot,
+): Promise<void> {
+  const active = await foreverItems.catalogIsActive(pool);
+  if (!active) return;
+  const row = await foreverItems.getItem(pool, itemId);
+  if (!row) {
+    throw new AppError(400, 'item_not_forever', 'Item is not in the Forever catalog.');
+  }
+  const aliases = row.slot_aliases ?? [];
+  if (row.slot !== slot && !aliases.includes(slot)) {
+    throw new AppError(400, 'item_not_in_slot', 'Item does not fit this equipment slot.');
+  }
+}
+
+function parseSlotsMap(raw: unknown): Record<string, number | null> | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new AppError(400, 'validation_error', 'Invalid slots.', {
+      slots: 'Must be an object map of slot → item_id|null.',
+    });
+  }
+  const out: Record<string, number | null> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(GEAR_SLOTS as readonly string[]).includes(k)) {
+      throw new AppError(400, 'invalid_slot', `Unknown slot: ${k}.`);
+    }
+    if (v === null) {
+      out[k] = null;
+      continue;
+    }
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+      throw new AppError(400, 'validation_error', 'Invalid slots.', {
+        [k]: 'item_id must be a positive integer or null.',
+      });
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
 export async function registerGearListRoutes(
   app: FastifyInstance,
   deps: GearListDeps,
@@ -102,7 +156,7 @@ export async function registerGearListRoutes(
     const characterId = (req.params as { character_id: string }).character_id;
     requireCharacterId(characterId);
     const selection = await authStore.getSelection(pool, s.userId);
-    requireOwnedCharacter(selection, characterId);
+    requireDisplayedCharacter(selection, characterId);
     const owned = await authStore.getCharacterForUser(pool, s.userId, characterId);
     if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
 
@@ -118,7 +172,9 @@ export async function registerGearListRoutes(
       const itemsOut = [];
       for (const list of lists) {
         const items = await gear.getItems(client, list.id);
-        itemsOut.push(gear.serializeList(list, items));
+        itemsOut.push(
+          gear.serializeList(list, items, { characterLevel: owned.level }),
+        );
       }
       await client.query('COMMIT');
       return { items: itemsOut };
@@ -137,11 +193,11 @@ export async function registerGearListRoutes(
     requireCharacterId(characterId);
     await requireGearWriteRate(pool, reply, s.userId);
     const selection = await authStore.getSelection(pool, s.userId);
-    requireOwnedCharacter(selection, characterId);
+    requireDisplayedCharacter(selection, characterId);
     const owned = await authStore.getCharacterForUser(pool, s.userId, characterId);
     if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
 
-    const body = (req.body ?? {}) as { name?: unknown; visibility?: unknown };
+    const body = (req.body ?? {}) as Record<string, unknown>;
     if (typeof body.name !== 'string') {
       throw new AppError(400, 'validation_error', 'Invalid list.', { name: 'Required.' });
     }
@@ -150,6 +206,22 @@ export async function registerGearListRoutes(
       throw new AppError(400, 'validation_error', 'Invalid list.', {
         name: `1..${MAX_LIST_NAME} chars, no control characters.`,
       });
+    }
+    const typeParsed = parseSetType(body.type);
+    if (!typeParsed.ok) {
+      throw new AppError(400, 'validation_error', 'Invalid list.', { type: typeParsed.detail });
+    }
+    const levelFields = validateSetLevelRules(typeParsed.value, body.until_level, owned.level);
+    if (levelFields) {
+      throw new AppError(400, 'validation_error', 'Invalid list.', levelFields);
+    }
+    const untilLevel =
+      typeParsed.value === 'max_level'
+        ? null
+        : (body.until_level as number);
+    const roleParsed = parseRoleSpec(body.role_spec);
+    if (!roleParsed.ok) {
+      throw new AppError(400, 'validation_error', 'Invalid list.', { role_spec: roleParsed.detail });
     }
     let visibility: 'private' | 'guild' = 'private';
     if (body.visibility !== undefined) {
@@ -160,34 +232,63 @@ export async function registerGearListRoutes(
       }
       visibility = body.visibility;
     }
+    const slots = parseSlotsMap(body.slots);
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
     const battletag = await loadBattletag(pool, s.userId);
     const actor = actorFromUser(s.userId, battletag);
+
+    if (slots) {
+      for (const [slot, itemId] of Object.entries(slots)) {
+        if (itemId != null) {
+          await assertForeverSlotItem(pool, itemId, slot as GearSlot);
+        }
+      }
+    }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await gear.setTenant(client, guildId);
       // Server-derived source: web session routes always record `web`.
-      const { list } = await gear.createList(client, {
+      let { list } = await gear.createList(client, {
         guildId,
         characterId,
         ownerUserId: s.userId,
         name,
         visibility,
+        setType: typeParsed.value,
+        untilLevel,
+        roleSpec: roleParsed.value,
         source: 'web',
         actor,
       });
+      if (slots) {
+        for (const [slot, itemId] of Object.entries(slots)) {
+          if (itemId == null) continue;
+          const applied = await gear.setListSlot(client, {
+            list,
+            expectedVersion: Number(list.version),
+            slot: slot as GearSlot,
+            itemId,
+            source: 'web',
+            actor,
+          });
+          if (!applied.ok) {
+            throw new AppError(409, 'version_mismatch', 'List was modified; reload and retry.');
+          }
+          list = applied.list;
+        }
+      }
       await client.query('COMMIT');
       const items = await gear.getItems(pool, list.id);
-      const serialized = gear.serializeList(list, items);
+      const serialized = gear.serializeList(list, items, { characterLevel: owned.level });
       reply.header('ETag', gear.etagForVersion(list.version));
       return reply.code(201).send(serialized);
     } catch (err) {
       await client.query('ROLLBACK');
       if (gear.isListLimitError(err)) {
-        throw new AppError(409, 'list_limit_reached', 'Maximum of 5 gear lists per character.');
+        throw new AppError(409, 'list_limit_reached', 'Maximum of 20 gear lists per character.');
       }
       throw err;
     } finally {
@@ -211,8 +312,11 @@ export async function registerGearListRoutes(
       }
       const items = await gear.getItems(client, list.id);
       await client.query('COMMIT');
+      const owned = await authStore.getCharacterForUser(pool, s.userId, list.character_id);
       reply.header('ETag', gear.etagForVersion(list.version));
-      return gear.serializeList(list, items);
+      return gear.serializeList(list, items, {
+        characterLevel: owned?.level ?? null,
+      });
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -228,9 +332,12 @@ export async function registerGearListRoutes(
     requireUuid(listId, 'list_id');
     await requireGearWriteRate(pool, reply, s.userId);
     const expected = requireIfMatch(req);
-    const body = (req.body ?? {}) as { name?: unknown; visibility?: unknown };
+    const body = (req.body ?? {}) as Record<string, unknown>;
     let name: string | undefined;
     let visibility: 'private' | 'guild' | undefined;
+    let setType: import('../gear/schema.js').GearSetType | undefined;
+    let untilLevel: number | null | undefined;
+    let roleSpec: string | null | undefined;
     if (body.name !== undefined) {
       if (typeof body.name !== 'string') {
         throw new AppError(400, 'validation_error', 'Invalid list.', { name: 'Must be a string.' });
@@ -248,6 +355,23 @@ export async function registerGearListRoutes(
       }
       visibility = body.visibility;
     }
+    if (body.type !== undefined) {
+      const parsed = parseSetType(body.type);
+      if (!parsed.ok) {
+        throw new AppError(400, 'validation_error', 'Invalid list.', { type: parsed.detail });
+      }
+      setType = parsed.value;
+    }
+    if (body.until_level !== undefined) {
+      untilLevel = body.until_level as number | null;
+    }
+    if (body.role_spec !== undefined) {
+      const parsed = parseRoleSpec(body.role_spec);
+      if (!parsed.ok) {
+        throw new AppError(400, 'validation_error', 'Invalid list.', { role_spec: parsed.detail });
+      }
+      roleSpec = parsed.value;
+    }
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
     const battletag = await loadBattletag(pool, s.userId);
@@ -262,12 +386,29 @@ export async function registerGearListRoutes(
         throw new AppError(403, 'forbidden', 'Only the list owner can edit.');
       }
       const selection = await authStore.getSelection(pool, s.userId);
-      requireOwnedCharacter(selection, list.character_id);
+      requireDisplayedCharacter(selection, list.character_id);
+      const owned = await authStore.getCharacterForUser(pool, s.userId, list.character_id);
+      const nextType = setType ?? list.set_type;
+      const nextUntil =
+        untilLevel !== undefined
+          ? untilLevel
+          : setType !== undefined && setType === 'max_level'
+            ? null
+            : list.until_level;
+      if (setType !== undefined || untilLevel !== undefined) {
+        const levelFields = validateSetLevelRules(nextType, nextUntil, owned?.level ?? null);
+        if (levelFields) {
+          throw new AppError(400, 'validation_error', 'Invalid list.', levelFields);
+        }
+      }
       const result = await gear.patchListMeta(client, {
         list,
         expectedVersion: expected,
         name,
         visibility,
+        setType,
+        untilLevel: setType === 'max_level' ? null : untilLevel,
+        roleSpec,
         source: 'web',
         actor,
       });
@@ -282,14 +423,18 @@ export async function registerGearListRoutes(
           },
           current: {
             version: Number(result.list.version),
-            list: gear.serializeList(result.list, items),
+            list: gear.serializeList(result.list, items, {
+              characterLevel: owned?.level ?? null,
+            }),
           },
         });
       }
       const items = await gear.getItems(client, result.list.id);
       await client.query('COMMIT');
       reply.header('ETag', gear.etagForVersion(result.list.version));
-      return gear.serializeList(result.list, items);
+      return gear.serializeList(result.list, items, {
+        characterLevel: owned?.level ?? null,
+      });
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -318,7 +463,7 @@ export async function registerGearListRoutes(
         throw new AppError(403, 'forbidden', 'Only the list owner can delete.');
       }
       const selection = await authStore.getSelection(pool, s.userId);
-      requireOwnedCharacter(selection, list.character_id);
+      requireDisplayedCharacter(selection, list.character_id);
       const result = await gear.deleteList(client, {
         list,
         expectedVersion: expected,
@@ -342,6 +487,86 @@ export async function registerGearListRoutes(
       }
       await client.query('COMMIT');
       return reply.code(204).send();
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+
+  app.put('/api/v1/gear-lists/:list_id/slots/:slot', async (req, reply) => {
+    requireCsrf(req);
+    const s = requireSession(req);
+    const params = req.params as { list_id: string; slot: string };
+    requireUuid(params.list_id, 'list_id');
+    if (!(GEAR_SLOTS as readonly string[]).includes(params.slot)) {
+      throw new AppError(400, 'invalid_slot', 'Unknown equipment slot.');
+    }
+    const slot = params.slot as GearSlot;
+    await requireGearWriteRate(pool, reply, s.userId);
+    const expected = requireIfMatch(req);
+    const body = (req.body ?? {}) as { item_id?: unknown };
+    if (!('item_id' in body)) {
+      throw new AppError(400, 'validation_error', 'Invalid slot update.', {
+        item_id: 'Required (number or null).',
+      });
+    }
+    let itemId: number | null;
+    if (body.item_id === null) {
+      itemId = null;
+    } else if (typeof body.item_id === 'number' && Number.isInteger(body.item_id) && body.item_id >= 1) {
+      itemId = body.item_id;
+    } else {
+      throw new AppError(400, 'validation_error', 'Invalid slot update.', {
+        item_id: 'Must be a positive integer or null.',
+      });
+    }
+    if (itemId != null) {
+      await assertForeverSlotItem(pool, itemId, slot);
+    }
+
+    const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
+    const battletag = await loadBattletag(pool, s.userId);
+    const actor = actorFromUser(s.userId, battletag);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await gear.setTenant(client, guildId);
+      const list = await gear.getList(client, params.list_id);
+      if (!list || list.deleted_at) throw new AppError(404, 'not_found', 'List not found.');
+      if (!gear.canWriteList(list, s.userId)) {
+        throw new AppError(404, 'not_found', 'List not found.');
+      }
+      const selection = await authStore.getSelection(pool, s.userId);
+      requireDisplayedCharacter(selection, list.character_id);
+      const result = await gear.setListSlot(client, {
+        list,
+        expectedVersion: expected,
+        slot,
+        itemId,
+        source: 'web',
+        actor,
+      });
+      if (!result.ok) {
+        await client.query('COMMIT');
+        return reply.code(409).send({
+          error: {
+            code: 'version_mismatch',
+            message: 'List was modified; reload and retry.',
+            request_id: req.id,
+          },
+          current: { version: Number(result.list.version) },
+        });
+      }
+      await client.query('COMMIT');
+      reply.header('ETag', gear.etagForVersion(result.list.version));
+      return {
+        slot,
+        item_id: itemId,
+        edited_at: result.list.updated_at.toISOString(),
+      };
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -390,7 +615,7 @@ export async function registerGearListRoutes(
       }
       // Re-check character still in main/alt selection at write time.
       const selection = await authStore.getSelection(pool, s.userId);
-      requireOwnedCharacter(selection, list.character_id);
+      requireDisplayedCharacter(selection, list.character_id);
 
       const catalogActive = await foreverItems.catalogIsActive(client);
       const result = await gear.applyOps(client, {
@@ -482,7 +707,7 @@ export async function registerGearListRoutes(
     if (envelope.characterId) {
       requireCharacterId(envelope.characterId);
       if (!selected.has(envelope.characterId)) {
-        throw new AppError(403, 'forbidden', 'Character is not in your selection.');
+        throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
       }
       owned = await authStore.getCharacterForUser(pool, s.userId, envelope.characterId);
     } else if (envelope.realm && envelope.name) {
@@ -493,11 +718,11 @@ export async function registerGearListRoutes(
         envelope.name,
       );
       if (owned && !selected.has(owned.id)) {
-        throw new AppError(403, 'forbidden', 'Character is not in your selection.');
+        throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
       }
     }
     if (!owned) {
-      throw new AppError(403, 'forbidden', 'Character is not in your selection.');
+      throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
     }
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);

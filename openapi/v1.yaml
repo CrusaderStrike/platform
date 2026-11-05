@@ -809,9 +809,9 @@ paths:
     post:
       tags: [gear]
       operationId: createCharacterGearList
-      summary: Create a gear wishlist (emits GearListCreated)
+      summary: Create a named gear set / wishlist (emits GearListCreated + optional GearSlotSet)
       description: |
-        Max **5** active lists per character. A 6th create returns **409** `list_limit_reached`.
+        Max **20** active lists per character. A 21st create returns **409** `list_limit_reached`.
         Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
         Gear writes are rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
@@ -826,12 +826,19 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [name, type]
               additionalProperties: false
               properties:
                 name: { type: string, minLength: 1, maxLength: 64 }
+                type: { type: string, enum: [leveling, max_level] }
+                until_level: { type: [integer, 'null'], minimum: 1, maximum: 60 }
+                role_spec: { type: [string, 'null'], maxLength: 32 }
                 visibility: { type: string, enum: [private, guild], default: private }
-            example: { name: Emberfall BiS, visibility: private }
+                slots:
+                  type: object
+                  additionalProperties: { type: [integer, 'null'] }
+                  description: Optional map of GearSlot → item_id|null
+            example: { name: Pre-BiS 50, type: leveling, until_level: 50, role_spec: fury, visibility: private }
       responses:
         '201':
           description: Created.
@@ -844,12 +851,12 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Already at 5 lists (`list_limit_reached`).
+          description: `list_limit_reached` (cap 20) or `character_not_displayed`.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               example:
-                error: { code: list_limit_reached, message: Maximum of 5 gear lists per character., request_id: req_1 }
+                error: { code: list_limit_reached, message: Maximum of 20 gear lists per character., request_id: req_1 }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}:
@@ -952,6 +959,55 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearVersionMismatch' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /gear-lists/{list_id}/slots/{slot}:
+    put:
+      tags: [gear]
+      operationId: putGearListSlot
+      summary: Set or clear one armory slot (If-Match; emits GearSlotSet or GearSlotCleared)
+      security: [{ session: [] }]
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - name: list_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: slot
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/GearSlot' }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string, example: '"v3"' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_id]
+              properties:
+                item_id: { type: [integer, 'null'], minimum: 1 }
+      responses:
+        '200':
+          description: Slot updated
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slot, item_id, edited_at]
+                properties:
+                  slot: { $ref: '#/components/schemas/GearSlot' }
+                  item_id: { type: [integer, 'null'] }
+                  edited_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}/ops:
@@ -1355,6 +1411,13 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    PreconditionRequired:
+      description: If-Match required (428)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: precondition_required, message: If-Match required., request_id: req_1 }
     PreconditionFailed:
       description: Version mismatch; reload and retry.
       content:
@@ -1956,13 +2019,22 @@ components:
           description: Optional HTTPS render.worldofwarcraft.com URL when resolved; often null on wishlist rows.
     GearList:
       type: object
-      required: [id, character_id, owner_user_id, name, visibility, version, updated_at, items]
+      required: [id, character_id, owner_user_id, name, visibility, type, until_level, role_spec, outgrown, edited_at, slots, version, updated_at, items]
       properties:
         id: { type: string, format: uuid }
         character_id: { type: string }
         owner_user_id: { type: string, format: uuid }
         name: { type: string }
         visibility: { type: string, enum: [private, guild] }
+        type: { type: string, enum: [leveling, max_level] }
+        until_level: { type: [integer, 'null'], minimum: 1, maximum: 60 }
+        role_spec: { type: [string, 'null'], maxLength: 32 }
+        outgrown: { type: boolean, description: 'true when leveling and character.level >= until_level' }
+        edited_at: { type: string, format: date-time, description: 'Same instant as updated_at / last event recorded_at' }
+        slots:
+          type: object
+          description: Map of all 19 GearSlots → item_id or null
+          additionalProperties: { type: [integer, 'null'] }
         version: { type: integer, description: 'Last applied event sequence; concurrency token for ETag vN.' }
         updated_at: { type: string, format: date-time }
         updated_source: { type: [string, 'null'], enum: [web, addon, companion, export, system, null] }
@@ -2000,7 +2072,7 @@ components:
         version: { type: integer }
         event_type:
           type: string
-          enum: [GearListCreated, GearListRenamed, GearListDeleted, GearItemAdded, GearItemRemoved, GearItemReprioritized, GearItemObtained, GearOpRejected]
+          enum: [GearListCreated, GearListRenamed, GearListDeleted, GearListMetaChanged, GearItemAdded, GearItemRemoved, GearItemReprioritized, GearItemObtained, GearSlotSet, GearSlotCleared, GearOpRejected]
         payload:
           description: Per-type payload; see GearEventPayload*.
           oneOf:

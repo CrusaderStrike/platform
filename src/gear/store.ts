@@ -4,6 +4,7 @@
  */
 import type { Pool, PoolClient } from '../db/pool.js';
 import {
+  GEAR_SLOTS,
   MAX_ITEMS_PER_LIST,
   MAX_LISTS_PER_CHARACTER,
   idempotencyKeyForCreate,
@@ -11,8 +12,11 @@ import {
   isAddonSideSource,
   type EventType,
   type GearOpIn,
+  type GearSetType,
+  type GearSlot,
   type GearSource,
 } from './schema.js';
+import { computeOutgrown } from './set-meta.js';
 import {
   ensurePersonalGuild,
   resolveUploadGuildId,
@@ -37,6 +41,9 @@ export type GearListRow = {
   name: string;
   version: string; // pg bigint
   visibility: 'private' | 'guild';
+  set_type: GearSetType;
+  until_level: number | null;
+  role_spec: string | null;
   deleted_at: Date | null;
   updated_at: Date;
   updated_source: GearSource | null;
@@ -203,6 +210,9 @@ export async function createList(
     ownerUserId: string;
     name: string;
     visibility: 'private' | 'guild';
+    setType: GearSetType;
+    untilLevel: number | null;
+    roleSpec: string | null;
     source: GearSource;
     actor: ActorInfo;
     listId?: string;
@@ -222,8 +232,9 @@ export async function createList(
   const ins = await db.query<GearListRow>(
     `INSERT INTO gear_lists (
        id, guild_id, character_id, owner_user_id, name, version, visibility,
+       set_type, until_level, role_spec,
        updated_at, updated_source, updated_by
-     ) VALUES ($1,$2,$3,$4,$5,1,$6, now(), $7, $8)
+     ) VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9, now(), $10, $11)
      ON CONFLICT (id) DO NOTHING
      RETURNING *`,
     [
@@ -233,6 +244,9 @@ export async function createList(
       args.ownerUserId,
       args.name,
       args.visibility,
+      args.setType,
+      args.untilLevel,
+      args.roleSpec,
       args.source,
       args.actor.display_name,
     ],
@@ -251,6 +265,9 @@ export async function createList(
       name: args.name,
       character_id: args.characterId,
       visibility: args.visibility,
+      type: args.setType,
+      until_level: args.untilLevel,
+      role_spec: args.roleSpec,
     },
     source: args.source,
     actor: args.actor,
@@ -276,6 +293,9 @@ export async function patchListMeta(
     expectedVersion: number;
     name?: string;
     visibility?: 'private' | 'guild';
+    setType?: GearSetType;
+    untilLevel?: number | null;
+    roleSpec?: string | null;
     source: GearSource;
     actor: ActorInfo;
   },
@@ -288,57 +308,104 @@ export async function patchListMeta(
   if (currentVersion !== args.expectedVersion) {
     return { ok: false, reason: 'version_mismatch', list: locked };
   }
-  const nextSeq = currentVersion + 1;
-  let eventType: EventType | null = null;
-  let payload: Record<string, unknown> = {};
+  let version = currentVersion;
   let name = locked.name;
   let visibility = locked.visibility;
+  let setType = locked.set_type;
+  let untilLevel = locked.until_level;
+  let roleSpec = locked.role_spec;
 
+  const renamePayload: Record<string, unknown> = {};
+  let doRename = false;
   if (args.name !== undefined && args.name !== locked.name) {
-    eventType = 'GearListRenamed';
-    payload = { name: args.name };
+    renamePayload.name = args.name;
     name = args.name;
+    doRename = true;
   }
   if (args.visibility !== undefined && args.visibility !== locked.visibility) {
-    // Fold visibility into GearListRenamed (with name when both change; name+visibility when visibility-only).
-    if (eventType === 'GearListRenamed') {
-      payload = { ...payload, visibility: args.visibility };
-    } else {
-      eventType = 'GearListRenamed';
-      payload = { name: locked.name, visibility: args.visibility };
-    }
+    renamePayload.visibility = args.visibility;
+    if (!doRename) renamePayload.name = locked.name;
     visibility = args.visibility;
+    doRename = true;
   }
-  if (!eventType) {
+
+  const metaPayload: Record<string, unknown> = {};
+  let doMeta = false;
+  if (args.setType !== undefined && args.setType !== locked.set_type) {
+    metaPayload.type = args.setType;
+    setType = args.setType;
+    doMeta = true;
+  }
+  if (args.untilLevel !== undefined && args.untilLevel !== locked.until_level) {
+    metaPayload.until_level = args.untilLevel;
+    untilLevel = args.untilLevel;
+    doMeta = true;
+  }
+  if (args.roleSpec !== undefined && args.roleSpec !== locked.role_spec) {
+    metaPayload.role_spec = args.roleSpec;
+    roleSpec = args.roleSpec;
+    doMeta = true;
+  }
+
+  if (!doRename && !doMeta) {
     return { ok: true, list: locked };
   }
 
-  const outcome = await appendEvent(db, {
-    guildId: locked.guild_id,
-    listId: locked.id,
-    seq: nextSeq,
-    eventType,
-    payload,
-    source: args.source,
-    actor: args.actor,
-    idempotencyKey: `meta:${locked.id}:${nextSeq}:${args.actor.user_id}`,
-  });
-  if (outcome === 'duplicate') {
-    const fresh = await getList(db, locked.id);
-    return { ok: false, reason: 'version_mismatch', list: fresh! };
+  if (doRename) {
+    version += 1;
+    const outcome = await appendEvent(db, {
+      guildId: locked.guild_id,
+      listId: locked.id,
+      seq: version,
+      eventType: 'GearListRenamed',
+      payload: renamePayload,
+      source: args.source,
+      actor: args.actor,
+      idempotencyKey: `meta:${locked.id}:${version}:${args.actor.user_id}`,
+    });
+    if (outcome === 'duplicate') {
+      const fresh = await getList(db, locked.id);
+      return { ok: false, reason: 'version_mismatch', list: fresh! };
+    }
+  }
+
+  if (doMeta) {
+    version += 1;
+    const outcome = await appendEvent(db, {
+      guildId: locked.guild_id,
+      listId: locked.id,
+      seq: version,
+      eventType: 'GearListMetaChanged',
+      payload: {
+        type: setType,
+        until_level: untilLevel,
+        role_spec: roleSpec,
+        ...metaPayload,
+      },
+      source: args.source,
+      actor: args.actor,
+      idempotencyKey: `setmeta:${locked.id}:${version}:${args.actor.user_id}`,
+    });
+    if (outcome === 'duplicate') {
+      const fresh = await getList(db, locked.id);
+      return { ok: false, reason: 'version_mismatch', list: fresh! };
+    }
   }
 
   const upd = await db.query<GearListRow>(
     `UPDATE gear_lists
-     SET name = $2, visibility = $3, version = $4,
-         updated_at = now(), updated_source = $5, updated_by = $6
-     WHERE id = $1 AND version = $7
+     SET name = $2, visibility = $3, set_type = $4, until_level = $5, role_spec = $6,
+         version = $7, updated_at = now(), updated_source = $8, updated_by = $9
+     WHERE id = $1 AND version = $10
      RETURNING *`,
     [
       locked.id,
       name,
       visibility,
-      nextSeq,
+      setType,
+      untilLevel,
+      roleSpec,
+      version,
       args.source,
       args.actor.display_name,
       args.expectedVersion,
@@ -413,7 +480,8 @@ async function lastItemTouchSeq(
     `SELECT seq FROM gear_list_events
      WHERE list_id = $1
        AND event_type IN (
-         'GearItemAdded','GearItemRemoved','GearItemReprioritized','GearItemObtained'
+         'GearItemAdded','GearItemRemoved','GearItemReprioritized','GearItemObtained',
+         'GearSlotSet','GearSlotCleared'
        )
        AND (payload->>'slot') = $2
        AND (payload->>'item_id')::int = $3
@@ -796,6 +864,9 @@ export async function rebuildFromLog(
 ): Promise<{
   name: string;
   visibility: 'private' | 'guild';
+  setType: GearSetType;
+  untilLevel: number | null;
+  roleSpec: string | null;
   version: number;
   deleted: boolean;
   items: Map<string, { slot: string; item_id: number; priority: number; note: string | null; obtained: boolean }>;
@@ -806,6 +877,9 @@ export async function rebuildFromLog(
   );
   let name = '';
   let visibility: 'private' | 'guild' = 'private';
+  let setType: GearSetType = 'max_level';
+  let untilLevel: number | null = null;
+  let roleSpec: string | null = null;
   let version = 0;
   let deleted = false;
   const items = new Map<
@@ -820,6 +894,14 @@ export async function rebuildFromLog(
       case 'GearListCreated':
         name = String(payload.name ?? '');
         visibility = (payload.visibility as 'private' | 'guild') ?? 'private';
+        if (payload.type === 'leveling' || payload.type === 'max_level') {
+          setType = payload.type;
+        }
+        untilLevel =
+          payload.until_level == null || payload.until_level === undefined
+            ? null
+            : Number(payload.until_level);
+        roleSpec = payload.role_spec == null ? null : String(payload.role_spec);
         break;
       case 'GearListRenamed':
         if (payload.name != null) name = String(payload.name);
@@ -827,9 +909,45 @@ export async function rebuildFromLog(
           visibility = payload.visibility;
         }
         break;
+      case 'GearListMetaChanged':
+        if (payload.type === 'leveling' || payload.type === 'max_level') {
+          setType = payload.type;
+        }
+        if ('until_level' in payload) {
+          untilLevel =
+            payload.until_level == null || payload.until_level === undefined
+              ? null
+              : Number(payload.until_level);
+        }
+        if ('role_spec' in payload) {
+          roleSpec = payload.role_spec == null ? null : String(payload.role_spec);
+        }
+        break;
       case 'GearListDeleted':
         deleted = true;
         break;
+      case 'GearSlotSet': {
+        const slot = String(payload.slot);
+        const item_id = Number(payload.item_id);
+        for (const key of [...items.keys()]) {
+          if (key.startsWith(`${slot}:`)) items.delete(key);
+        }
+        items.set(itemKey(slot, item_id), {
+          slot,
+          item_id,
+          priority: 1,
+          note: null,
+          obtained: false,
+        });
+        break;
+      }
+      case 'GearSlotCleared': {
+        const slot = String(payload.slot);
+        for (const key of [...items.keys()]) {
+          if (key.startsWith(`${slot}:`)) items.delete(key);
+        }
+        break;
+      }
       case 'GearItemAdded': {
         const slot = String(payload.slot);
         const item_id = Number(payload.item_id);
@@ -866,7 +984,104 @@ export async function rebuildFromLog(
         break;
     }
   }
-  return { name, visibility, version, deleted, items };
+  return { name, visibility, setType, untilLevel, roleSpec, version, deleted, items };
+}
+
+
+/**
+ * Armory per-slot PUT: clear slot (itemId null) or replace with a single item at priority 1.
+ * Emits GearSlotCleared or GearSlotSet; If-Match version checked by caller via expectedVersion.
+ */
+export async function setListSlot(
+  db: Db,
+  args: {
+    list: GearListRow;
+    expectedVersion: number;
+    slot: GearSlot;
+    itemId: number | null;
+    source: GearSource;
+    actor: ActorInfo;
+  },
+): Promise<
+  | { ok: true; list: GearListRow }
+  | { ok: false; reason: 'version_mismatch'; list: GearListRow }
+> {
+  const locked = await lockListForUpdate(db, args.list.id);
+  if (!locked || locked.deleted_at) {
+    return { ok: false, reason: 'version_mismatch', list: args.list };
+  }
+  const currentVersion = Number(locked.version);
+  if (currentVersion !== args.expectedVersion) {
+    return { ok: false, reason: 'version_mismatch', list: locked };
+  }
+  const nextSeq = currentVersion + 1;
+  if (args.itemId == null) {
+    const outcome = await appendEvent(db, {
+      guildId: locked.guild_id,
+      listId: locked.id,
+      seq: nextSeq,
+      eventType: 'GearSlotCleared',
+      payload: { slot: args.slot },
+      source: args.source,
+      actor: args.actor,
+      idempotencyKey: `slotclear:${locked.id}:${nextSeq}:${args.slot}`,
+    });
+    if (outcome === 'duplicate') {
+      const fresh = await getList(db, locked.id);
+      return { ok: false, reason: 'version_mismatch', list: fresh! };
+    }
+    await db.query(`DELETE FROM gear_list_items WHERE list_id = $1 AND slot = $2`, [
+      locked.id,
+      args.slot,
+    ]);
+  } else {
+    const outcome = await appendEvent(db, {
+      guildId: locked.guild_id,
+      listId: locked.id,
+      seq: nextSeq,
+      eventType: 'GearSlotSet',
+      payload: { slot: args.slot, item_id: args.itemId },
+      source: args.source,
+      actor: args.actor,
+      idempotencyKey: `slotset:${locked.id}:${nextSeq}:${args.slot}:${args.itemId}`,
+    });
+    if (outcome === 'duplicate') {
+      const fresh = await getList(db, locked.id);
+      return { ok: false, reason: 'version_mismatch', list: fresh! };
+    }
+    await db.query(`DELETE FROM gear_list_items WHERE list_id = $1 AND slot = $2`, [
+      locked.id,
+      args.slot,
+    ]);
+    await db.query(
+      `INSERT INTO gear_list_items (guild_id, list_id, slot, item_id, priority, note, obtained, obtained_at)
+       VALUES ($1,$2,$3,$4,1,NULL,false,NULL)`,
+      [locked.guild_id, locked.id, args.slot, args.itemId],
+    );
+  }
+  const upd = await db.query<GearListRow>(
+    `UPDATE gear_lists
+     SET version = $2, updated_at = now(), updated_source = $3, updated_by = $4
+     WHERE id = $1 AND version = $5
+     RETURNING *`,
+    [locked.id, nextSeq, args.source, args.actor.display_name, args.expectedVersion],
+  );
+  if (!upd.rows[0]) {
+    const fresh = await getList(db, args.list.id);
+    return { ok: false, reason: 'version_mismatch', list: fresh! };
+  }
+  return { ok: true, list: upd.rows[0] };
+}
+
+export function slotsMapFromItems(items: GearItemRow[]): Record<GearSlot, number | null> {
+  const out = Object.fromEntries(GEAR_SLOTS.map((s) => [s, null])) as Record<GearSlot, number | null>;
+  for (const slot of GEAR_SLOTS) {
+    const inSlot = items
+      .filter((i) => i.slot === slot && !i.obtained)
+      .sort((a, b) => a.priority - b.priority || a.item_id - b.item_id);
+    if (inSlot[0]) out[slot] = inSlot[0].item_id;
+  }
+  return out;
 }
 
 export function etagForVersion(version: number | string): string {
@@ -883,15 +1098,26 @@ export function parseIfMatchVersion(header: string | string | undefined): number
 export function serializeList(
   list: GearListRow,
   items: GearItemRow[],
+  opts?: { characterLevel?: number | null },
 ): Record<string, unknown> {
+  const setType = (list.set_type ?? 'max_level') as GearSetType;
+  const untilLevel = list.until_level ?? null;
+  const characterLevel = opts?.characterLevel ?? null;
+  const editedAt = list.updated_at.toISOString();
   return {
     id: list.id,
     character_id: list.character_id,
     owner_user_id: list.owner_user_id,
     name: list.name,
     visibility: list.visibility,
+    type: setType,
+    until_level: untilLevel,
+    role_spec: list.role_spec ?? null,
+    outgrown: computeOutgrown(setType, untilLevel, characterLevel),
+    edited_at: editedAt,
+    slots: slotsMapFromItems(items),
     version: Number(list.version),
-    updated_at: list.updated_at.toISOString(),
+    updated_at: editedAt,
     updated_source: list.updated_source,
     items: items.map((i) => ({
       slot: i.slot,
