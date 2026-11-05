@@ -236,14 +236,23 @@ export async function startMockBlizzard(
           send(res, 404, { code: 404 });
           return;
         }
-        const iconName = itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`;
+        // Test itemIds for icon_url sanitizer integration:
+        // 12345 valid; 90001 http; 90002 wrong host; 90003 lookalike; 90004 malformed
+        let value: string;
+        if (itemId === 90001) {
+          value = 'http://render.worldofwarcraft.com/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90002) {
+          value = 'https://evil.example/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90003) {
+          value = 'https://render.worldofwarcraft.com.evil.com/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90004) {
+          value = 'not a url';
+        } else {
+          const iconName = itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`;
+          value = `https://render.worldofwarcraft.com/us/icons/56/${iconName}.jpg`;
+        }
         send(res, 200, {
-          assets: [
-            {
-              key: 'icon',
-              value: `https://render.worldofwarcraft.com/us/icons/56/${iconName}.jpg`,
-            },
-          ],
+          assets: [{ key: 'icon', value }],
         });
         return;
       }

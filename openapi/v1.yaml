@@ -1251,7 +1251,9 @@ components:
           description: |
             Full HTTPS URL from Blizzard Item Media (`GET /data/wow/media/item/{itemId}`,
             namespace `static-classic-{region}`, `assets[key=icon].value`). Platform resolves and
-            caches this; clients must not build `render.worldofwarcraft.com` URLs themselves.
+            caches this. Only `https` URLs whose host is exactly `render.worldofwarcraft.com`
+            are stored or returned; anything else becomes null. Clients must not build
+            `render.worldofwarcraft.com` URLs themselves.
     CharacterGearInput:
       type: object
       required: [items]

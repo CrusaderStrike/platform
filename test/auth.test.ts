@@ -9,6 +9,7 @@ import {
   TokenDecryptError,
   validateTokenEncKey,
 } from '../src/lib/crypto.js';
+import { sanitizeBlizzardIconUrl } from '../src/lib/icon-url.js';
 import {
   shutdownEmbeddedPg,
   signIn,
@@ -370,6 +371,40 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(expose.toLowerCase().split(/,\s*/)).toContain('retry-after');
   });
 
+
+  it('rejects invalid Blizzard icon media URLs (http/wrong/lookalike/malformed)', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const chars = (
+      await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
+    ).json() as { characters: Array<{ id: string }> };
+    const id = chars.characters[0]!.id;
+
+    const cases = [
+      { itemId: 90001, label: 'http' },
+      { itemId: 90002, label: 'wrong host' },
+      { itemId: 90003, label: 'lookalike' },
+      { itemId: 90004, label: 'malformed' },
+    ];
+    for (const c of cases) {
+      const put = await ctx.app.inject({
+        method: 'PUT',
+        url: `/api/v1/characters/${id}/gear`,
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload: { items: [{ slot: 'head', itemId: c.itemId, name: c.label }] },
+      });
+      expect(put.statusCode, c.label).toBe(200);
+      const items = (put.json() as { items: Array<{ icon_url: string | null }> }).items;
+      expect(items[0]!.icon_url, c.label).toBeNull();
+      const cached = await ctx.pool.query<{ icon_url: string | null }>(
+        `SELECT icon_url FROM item_icon_cache WHERE item_id = $1`,
+        [c.itemId],
+      );
+      // Cached null is fine; must never store the invalid URL string
+      expect(cached.rows[0]?.icon_url ?? null, c.label).toBeNull();
+    }
+  });
+
   it('refresh with non-v1 token → 401 and tokens cleared', async () => {
     ctx = await startTestApp();
     const { cookie, csrf } = await signIn(ctx);
@@ -507,3 +542,34 @@ describe('token encryption', () => {
   });
 });
 
+describe('blizzard icon_url sanitizer', () => {
+  it('accepts https://render.worldofwarcraft.com', () => {
+    const u = 'https://render.worldofwarcraft.com/us/icons/56/inv_helmet_03.jpg';
+    expect(sanitizeBlizzardIconUrl(u)).toBe(u);
+  });
+
+  it('rejects http URLs', () => {
+    expect(
+      sanitizeBlizzardIconUrl('http://render.worldofwarcraft.com/us/icons/56/inv.jpg'),
+    ).toBeNull();
+  });
+
+  it('rejects wrong host', () => {
+    expect(sanitizeBlizzardIconUrl('https://evil.example/us/icons/56/inv.jpg')).toBeNull();
+  });
+
+  it('rejects lookalike host', () => {
+    expect(
+      sanitizeBlizzardIconUrl(
+        'https://render.worldofwarcraft.com.evil.com/us/icons/56/inv.jpg',
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects malformed values', () => {
+    expect(sanitizeBlizzardIconUrl('not a url')).toBeNull();
+    expect(sanitizeBlizzardIconUrl('')).toBeNull();
+    expect(sanitizeBlizzardIconUrl(null)).toBeNull();
+    expect(sanitizeBlizzardIconUrl(undefined)).toBeNull();
+  });
+});

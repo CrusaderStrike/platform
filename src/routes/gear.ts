@@ -3,6 +3,7 @@ import type { Pool } from '../db/pool.js';
 import type { Config } from '../config.js';
 import type { BlizzardClient } from '../blizzard/client.js';
 import { decryptSecret, TokenDecryptError } from '../lib/crypto.js';
+import { sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
 import { AppError } from '../lib/errors.js';
 import * as store from '../auth/store.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
@@ -89,13 +90,16 @@ async function resolveIconUrl(
   if (!accessToken) return { icon_url: null, icon_name: null };
   try {
     const media = await blizzard.fetchItemIconUrl(accessToken, itemId, region as 'us');
+    const iconUrl = sanitizeBlizzardIconUrl(media.iconUrl);
+    const iconName = iconUrl ? media.iconName : null;
+    // Cache only sanitized values (null = looked up, nothing valid to serve).
     await store.upsertCachedItemIcon(pool, {
       itemId,
       region,
-      iconUrl: media.iconUrl,
-      iconName: media.iconName,
+      iconUrl,
+      iconName,
     });
-    return { icon_url: media.iconUrl, icon_name: media.iconName };
+    return { icon_url: iconUrl, icon_name: iconName };
   } catch {
     return { icon_url: null, icon_name: null };
   }

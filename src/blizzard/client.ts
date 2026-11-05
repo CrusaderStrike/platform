@@ -10,6 +10,7 @@ import {
   profileNamespace,
   type BlizzardRegion,
 } from './regions.js';
+import { iconNameFromUrl, sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
 
 export type BlizzardClientConfig = {
   clientId: string;
@@ -225,12 +226,9 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
         assets?: Array<{ key?: string; value?: string }>;
       };
       const icon = (body.assets ?? []).find((a) => a.key === 'icon');
-      const iconUrl = icon?.value && /^https:\/\//i.test(icon.value) ? icon.value : null;
-      let iconName: string | null = null;
-      if (iconUrl) {
-        const m = iconUrl.match(/\/([a-zA-Z0-9_-]+)\.(jpg|png|webp)(?:\?|$)/i);
-        iconName = m?.[1] ?? null;
-      }
+      // Only https://render.worldofwarcraft.com — never cache or emit anything else.
+      const iconUrl = sanitizeBlizzardIconUrl(icon?.value);
+      const iconName = iconNameFromUrl(iconUrl);
       return { iconUrl, iconName };
     },
   };
