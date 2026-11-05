@@ -744,7 +744,7 @@ paths:
       description: |
         Max **5** active lists per character. A 6th create returns **409** `list_limit_reached`.
         Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
-        Gear writes are rate-limited (~60 writes/min per user, rolling window, no minimum interval); over limit → **429** with `Retry-After`.
+        Gear writes are rate-limited (~60 writes/min per user, rolling window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - name: character_id
           in: path
@@ -810,7 +810,7 @@ paths:
         Mismatch → **409** `version_mismatch` with `current: { version, list }` so the client
         can re-apply without another GET. Only the **owner** may write; officers get **403** `forbidden`.
         Emits `GearListRenamed` (name and/or visibility in payload).
-        Missing If-Match → **428** `precondition_required`. Rate-limited (~60 writes/min rolling window) → **429** with `Retry-After`.
+        Missing If-Match → **428** `precondition_required`. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -907,7 +907,7 @@ paths:
         beyond `ops` are rejected (client `source` is ignored; server records `web`). Max 200 ops.
         Non-Forever `item_id` → the op is rejected; when a Forever catalog is enforced, clients
         should prefer **422** `item_not_forever` on single-item helpers — reserved code.
-        Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`.
+        Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -1045,7 +1045,7 @@ paths:
 
         Conflict rules: auto-merge by slot/item; last-writer-wins by `recorded_at`; stale
         `base_version` loses; delete wins; losers → `GearOpRejected` in `conflicts[]`.
-        Max body 1 MiB. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`.
+        Max body 1 MiB. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
         Per-list failures return a stable `error` object (no raw database messages).
         At most **500** ops total across all lists in one request.
       security: [{ uploaderToken: [] }, { session: [] }]

@@ -927,26 +927,17 @@ export function serializeEvent(ev: GearEventRow): Record<string, unknown> {
 export const GEAR_WRITE_LIMIT_PER_MIN = 60;
 export const GEAR_WRITE_WINDOW_MS = 60_000;
 
-export async function checkGearWriteRateLimit(
+/**
+ * Atomically consume one gear-write token in the rolling 60/min window.
+ * Call **once before** the write (not check-then-touch after). Concurrent callers
+ * serialize on the row update, so at most 60 requests per window see write_count <= 60.
+ * A later failed write (e.g. 409) still consumes the token.
+ */
+export async function consumeGearWrite(
   db: Db,
   userId: string,
-): Promise<{ ok: true } | { ok: false; retryAfterSec: number }> {
-  const row = await db.query<{ window_start: Date; write_count: number }>(
-    `SELECT window_start, write_count FROM gear_write_rate_limits WHERE user_id = $1`,
-    [userId],
-  );
-  const cur = row.rows[0];
-  if (!cur) return { ok: true };
-  const elapsed = Date.now() - cur.window_start.getTime();
-  if (elapsed >= GEAR_WRITE_WINDOW_MS) return { ok: true };
-  if (cur.write_count < GEAR_WRITE_LIMIT_PER_MIN) return { ok: true };
-  const retryAfter = Math.max(1, Math.ceil((GEAR_WRITE_WINDOW_MS - elapsed) / 1000));
-  return { ok: false, retryAfterSec: retryAfter };
-}
-
-/** Record one successful gear write against the rolling 60/min bucket. */
-export async function touchGearWriteRateLimit(db: Db, userId: string): Promise<void> {
-  await db.query(
+): Promise<{ ok: true; write_count: number } | { ok: false; retryAfterSec: number; write_count: number }> {
+  const r = await db.query<{ window_start: Date; write_count: number }>(
     `INSERT INTO gear_write_rate_limits (user_id, window_start, write_count)
      VALUES ($1, now(), 1)
      ON CONFLICT (user_id) DO UPDATE SET
@@ -959,9 +950,18 @@ export async function touchGearWriteRateLimit(db: Db, userId: string): Promise<v
          WHEN gear_write_rate_limits.window_start <= now() - interval '60 seconds'
            THEN 1
          ELSE gear_write_rate_limits.write_count + 1
-       END`,
+       END
+     RETURNING window_start, write_count`,
     [userId],
   );
+  const row = r.rows[0]!;
+  const count = Number(row.write_count);
+  if (count <= GEAR_WRITE_LIMIT_PER_MIN) {
+    return { ok: true, write_count: count };
+  }
+  const elapsed = Date.now() - row.window_start.getTime();
+  const retryAfter = Math.max(1, Math.ceil((GEAR_WRITE_WINDOW_MS - elapsed) / 1000));
+  return { ok: false, retryAfterSec: retryAfter, write_count: count };
 }
 
 export async function clearGearWriteRateLimit(db: Db, userId?: string): Promise<void> {

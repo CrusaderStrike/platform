@@ -6,7 +6,8 @@ export type PoolClient = pg.PoolClient;
 export function createPool(databaseUrl: string): Pool {
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    max: 10,
+    // Tests fire parallel gear writes; keep prod small.
+    max: process.env.NODE_ENV === 'test' ? 80 : 10,
     idleTimeoutMillis: 30_000,
   });
   pool.on('error', (err) => {

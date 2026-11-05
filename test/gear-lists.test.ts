@@ -733,6 +733,52 @@ describe('gear lists (platform#17)', () => {
     expect(Number(retryAfter)).toBeGreaterThan(0);
   });
 
+
+  it('70 parallel writes: exactly 60 non-429 under atomic consumeGearWrite', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await clearCooldown(ctx);
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'AtomicLimit' },
+    });
+    expect(created.statusCode).toBe(201);
+    const list = created.json() as { id: string; version: number };
+    await clearCooldown(ctx);
+
+    const results = await Promise.all(
+      Array.from({ length: 70 }, (_, i) =>
+        ctx.app.inject({
+          method: 'POST',
+          url: `/api/v1/gear-lists/${list.id}/ops`,
+          headers: { cookie, 'x-csrf-token': csrf },
+          payload: {
+            ops: [
+              {
+                op_id: randomUUID(),
+                type: 'add_item',
+                slot: 'finger2',
+                item_id: 5000 + i,
+                priority: 1,
+                base_version: list.version,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const allowed = results.filter((r) => r.statusCode !== 429);
+    const limited = results.filter((r) => r.statusCode === 429);
+    expect(allowed).toHaveLength(60);
+    expect(limited).toHaveLength(10);
+    for (const r of limited) {
+      expect(r.headers['retry-after']).toBeDefined();
+      expect(Number(r.headers['retry-after'])).toBeGreaterThan(0);
+    }
+  });
+
   it('parallel ops/PATCH/create serialize without 500 and respect 5-list cap', async () => {
     const { cookie, csrf } = await signIn(ctx);
     const characterId = await selectMain(ctx, cookie, csrf);

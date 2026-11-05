@@ -82,8 +82,8 @@ async function requireGearWriteRate(
   reply: FastifyReply,
   userId: string,
 ): Promise<void> {
-  // ~60 writes/min rolling bucket (no minimum interval). Further tuning → follow-up.
-  const rate = await gear.checkGearWriteRateLimit(pool, userId);
+  // Atomic consume before the write (~60/min). A later failed write still spends the token.
+  const rate = await gear.consumeGearWrite(pool, userId);
   if (!rate.ok) {
     reply.header('Retry-After', String(rate.retryAfterSec));
     throw new AppError(429, 'rate_limited', 'Gear write is rate-limited. Try again shortly.');
@@ -179,7 +179,6 @@ export async function registerGearListRoutes(
         actor,
       });
       await client.query('COMMIT');
-      await gear.touchGearWriteRateLimit(pool, s.userId);
       const items = await gear.getItems(pool, list.id);
       const serialized = gear.serializeList(list, items);
       reply.header('ETag', gear.etagForVersion(list.version));
@@ -288,7 +287,6 @@ export async function registerGearListRoutes(
       }
       const items = await gear.getItems(client, result.list.id);
       await client.query('COMMIT');
-      await gear.touchGearWriteRateLimit(pool, s.userId);
       reply.header('ETag', gear.etagForVersion(result.list.version));
       return gear.serializeList(result.list, items);
     } catch (err) {
@@ -342,7 +340,6 @@ export async function registerGearListRoutes(
         });
       }
       await client.query('COMMIT');
-      await gear.touchGearWriteRateLimit(pool, s.userId);
       return reply.code(204).send();
     } catch (err) {
       await client.query('ROLLBACK');
@@ -404,7 +401,6 @@ export async function registerGearListRoutes(
       const fresh = await gear.getList(client, listId);
       const items = await gear.getItems(client, listId);
       await client.query('COMMIT');
-      await gear.touchGearWriteRateLimit(pool, s.userId);
       return {
         version: result.version,
         applied: result.applied,
@@ -568,7 +564,8 @@ export async function registerGearListRoutes(
           });
         } catch (err) {
           await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-          // Never leak raw Postgres / driver messages to clients.
+          // Log detail server-side; never leak raw Postgres / driver text to clients.
+          req.log.error({ err, list_id: entry.list_id }, 'gear sync list failed');
           gearResults.push({
             list_id: entry.list_id,
             error: {
@@ -579,7 +576,6 @@ export async function registerGearListRoutes(
         }
       }
       await client.query('COMMIT');
-      await gear.touchGearWriteRateLimit(pool, s.userId);
       return {
         character_id: owned.id,
         source: envelope.source,
@@ -594,9 +590,11 @@ export async function registerGearListRoutes(
     }
   });
 
-  app.decorate('clearGearWriteCooldowns', async (userId?: string) => {
-    await gear.clearGearWriteRateLimit(pool, userId);
-  });
+  if (process.env.NODE_ENV === 'test') {
+    app.decorate('clearGearWriteCooldowns', async (userId?: string) => {
+      await gear.clearGearWriteRateLimit(pool, userId);
+    });
+  }
 }
 
 declare module 'fastify' {
