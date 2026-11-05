@@ -2,11 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from '../db/pool.js';
 import type { Config } from '../config.js';
 import type { BlizzardClient } from '../blizzard/client.js';
-import { decryptSecret } from '../lib/crypto.js';
+import { decryptSecret, TokenDecryptError } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
 import { isBlizzardRegion } from '../blizzard/regions.js';
 import * as store from '../auth/store.js';
-import { requireCsrf, requireSession } from '../auth/session.js';
+import { clearSessionCookie, requireCsrf, requireSession } from '../auth/session.js';
 
 const REFRESH_COOLDOWN_MS = 60_000;
 
@@ -108,8 +108,17 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
     }
     let access: string;
     try {
-      access = decryptSecret(user.access_token, config.TOKEN_ENC_KEY);
+      access = decryptSecret(user.access_token, config.TOKEN_ENC_KEY, {
+        previousKeyHex: config.TOKEN_ENC_KEY_PREVIOUS,
+      });
     } catch (err) {
+      if (err instanceof TokenDecryptError) {
+        req.log.warn({ user_id: s.userId, code: err.code }, 'stored blizzard token invalid; forcing re-login');
+        await store.clearUserTokens(pool, s.userId);
+        await store.revokeSession(pool, s.sessionId);
+        clearSessionCookie(reply, config.cookieSecure);
+        throw new AppError(401, 'unauthenticated', 'Sign in again.');
+      }
       req.log.error({ err }, 'token decrypt failed');
       throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
     }

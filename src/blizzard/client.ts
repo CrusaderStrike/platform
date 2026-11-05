@@ -40,6 +40,20 @@ export type BlizzardClient = {
   fetchForeverCharacters(accessToken: string, region: BlizzardRegion): Promise<NormalizedCharacter[]>;
   /** Fetch Forever characters across all configured regions and merge. */
   fetchForeverCharactersAll(accessToken: string): Promise<NormalizedCharacter[]>;
+  /**
+   * Item Media icon HTTPS URL for Forever.
+   * Currently always returns null: Blizzard has not published an official Forever
+   * static namespace that pairs with profile-forever-{region}. Community probes
+   * suggest static-forever-{region}, but that is unconfirmed — do not call Item
+   * Media until develop.battle.net documents it.
+   * TODO(forever-static): resume GET /data/wow/media/item/{id} with the official
+   * static-forever-{region} (or whatever Blizzard publishes) once confirmed.
+   */
+  fetchItemIconUrl(
+    accessToken: string,
+    itemId: number,
+    region?: BlizzardRegion,
+  ): Promise<{ iconUrl: string | null; iconName: string | null }>;
 };
 
 function mapFaction(raw?: string | null): 'alliance' | 'horde' | null {
@@ -194,6 +208,16 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
         }
       }
       return all;
+    },
+    async fetchItemIconUrl(_accessToken, _itemId, _region = cfg.region) {
+      // Skip Item Media until Blizzard publishes an official Forever static namespace
+      // (community probes name static-forever-{region}; unconfirmed — do not guess).
+      // TODO(forever-static): call GET /data/wow/media/item/{id}?namespace=static-forever-{region}
+      // once develop.battle.net documents it; sanitize with sanitizeBlizzardIconUrl.
+      void _accessToken;
+      void _itemId;
+      void _region;
+      return { iconUrl: null, iconName: null };
     },
   };
 }

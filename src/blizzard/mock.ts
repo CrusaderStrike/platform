@@ -183,6 +183,10 @@ export async function startMockBlizzard(
           return;
         }
         const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic')) {
+          send(res, 403, { error: 'classic_namespace_rejected' });
+          return;
+        }
         if (!ns.startsWith('profile-forever-')) {
           send(res, 403, { error: 'wrong_namespace' });
           return;
@@ -211,6 +215,55 @@ export async function startMockBlizzard(
           forever = [];
         }
         send(res, 200, { wow_accounts: [{ id: 1, characters: forever }] });
+        return;
+      }
+
+
+      if (req.method === 'GET' && url.pathname.startsWith('/data/wow/media/item/')) {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        // Forever-only: reject any Classic namespace (or anything containing 'classic').
+        if (ns.toLowerCase().includes('classic')) {
+          send(res, 403, { error: 'classic_namespace_rejected' });
+          return;
+        }
+        // Accept Forever static (unconfirmed official name; mock allows it for future enablement).
+        if (!ns.startsWith('static-forever-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        const idStr = url.pathname.split('/').pop() ?? '';
+        const itemId = Number(idStr);
+        if (!Number.isInteger(itemId) || itemId < 1) {
+          send(res, 404, { code: 404 });
+          return;
+        }
+        // Test itemIds for icon_url sanitizer integration:
+        // 12345 valid; 90001 http; 90002 wrong host; 90003 lookalike; 90004 malformed
+        let value: string;
+        if (itemId === 90001) {
+          value = 'http://render.worldofwarcraft.com/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90002) {
+          value = 'https://evil.example/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90003) {
+          value = 'https://render.worldofwarcraft.com.evil.com/us/icons/56/inv_bad.jpg';
+        } else if (itemId === 90004) {
+          value = 'not a url';
+        } else {
+          const iconName = itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`;
+          value = `https://render.worldofwarcraft.com/us/icons/56/${iconName}.jpg`;
+        }
+        send(res, 200, {
+          assets: [{ key: 'icon', value }],
+        });
         return;
       }
 

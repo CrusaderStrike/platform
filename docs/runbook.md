@@ -24,6 +24,7 @@ Check with: `dig +short crusaderstrike.com A`, `dig +short www.crusaderstrike.co
 - Allowed origins: `https://crusaderstrike.com` and `https://www.crusaderstrike.com` (both are first-class origins). No other origin gets CORS headers.
 - Applied in `caddy/Caddyfile` (matcher `@cors_origin`) on every API path, including `/healthz`: `Access-Control-Allow-Origin` reflects the request origin, `Vary: Origin`, methods `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Content-Type, X-CSRF-Token`, max-age 600. Preflight `OPTIONS` from an allowed origin gets `204` at Caddy.
 - Signup (`POST /signups`) is uncredentialed. When auth/session goes live, add `Access-Control-Allow-Credentials: true` (never with `*`). Caddy and the app must stay in sync; if the app later sets CORS itself, remove it from Caddy so headers are not duplicated.
+- **Expose `Retry-After`:** the Fastify app sets `Access-Control-Expose-Headers: Retry-After` so the browser can read the 429 countdown on `POST /api/v1/me/characters/refresh`. If CORS headers are still emitted from the droplet `caddy/Caddyfile`, add the matching expose header there too, e.g. `Access-Control-Expose-Headers Retry-After` (or append to an existing expose list). Keep Caddy and the app in sync; do not leave expose only on one layer. (Documented here for the next Caddy edit — do not change the live droplet from this PR alone.)
 - Check:
   ```
   curl -sI -H 'Origin: https://crusaderstrike.com' https://api.crusaderstrike.com/healthz | grep -i access-control
@@ -126,6 +127,40 @@ Caddyfile changes: back up first (`cp -p caddy/Caddyfile caddy/Caddyfile.bak-$(d
 | Site up on apex, www TLS/DNS broken | `curl -vI https://www.crusaderstrike.com`, `dig www.crusaderstrike.com CNAME` | Make sure www is a CNAME to `crusaderstrike.github.io`, then re-set the Pages custom domain to re-issue the cert (see Website). |
 | Browser CORS error from the site | CORS check under Architecture | Confirm the `@cors_origin` block in the Caddyfile lists both origins, then reload Caddy. |
 | Droplet unreachable | DO console, droplet status | Power cycle from the DO console, with approval. |
+
+
+
+## Deploy checklist (API)
+
+Required before the first production API deploy (and every rotate):
+
+1. **TOKEN_ENC_KEY set to a fresh, valid prod key** — 64 hex chars (`openssl rand -hex 32`). Never the example from `.env.example` / compose, never all-identical digits, never commit the value.
+2. `BLIZZARD_MOCK=false` with real `BLIZZARD_CLIENT_ID` / `BLIZZARD_CLIENT_SECRET`.
+3. `BLIZZARD_REGIONS` set for the Forever regions you serve.
+4. `SESSION_SECRET` is unique and ≥32 bytes of entropy.
+5. Migrations applied (`npm run migrate` / image entrypoint).
+6. `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 after cutover.
+
+## TOKEN_ENC_KEY rotation
+
+Blizzard OAuth tokens are stored AES-256-GCM encrypted with prefix `v1:`. The key lives only in the operator vault / droplet env — **never in the repo**. Platform Dev (and Bot for deploy) can rotate it.
+
+### Generate a key
+```
+openssl rand -hex 32
+```
+
+### Rotate without forcing every user to re-login
+1. Set `TOKEN_ENC_KEY` to the **new** key and `TOKEN_ENC_KEY_PREVIOUS` to the **old** key (decrypt-only).
+2. Redeploy. New logins encrypt with the new key (`v1:` payload under the new key). Existing `v1:` rows still decrypt via the previous key.
+3. Optional grace: after most sessions have refreshed or re-authed, clear `TOKEN_ENC_KEY_PREVIOUS` and redeploy. Tokens that still only decrypt with the old key will fail closed and force re-login (see below).
+4. Future scheme bump: new writes can move to a `v2:` prefix while `v1:` continues to decrypt during a grace window; retire `v1:` / the previous key after the window.
+
+### Force re-login fallback
+If you cannot keep the previous key (compromise, lost key), deploy with only the new `TOKEN_ENC_KEY`. Any stored token that is missing the `v1:` prefix or fails decrypt is cleared; the user gets `401 unauthenticated` and must sign in again. Logs include `user_id` and error code only — **never the key or token material**.
+
+### Where the key is stored
+Operator vault and `/opt/crusaderstrike/.env` on the droplet (mode 0600). Who can rotate: Platform Dev via Bot-approved deploy.
 
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.

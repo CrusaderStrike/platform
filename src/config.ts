@@ -6,6 +6,7 @@ import {
   parseRegionsList,
   type BlizzardRegion,
 } from './blizzard/regions.js';
+import { validateTokenEncKey } from './lib/crypto.js';
 
 const bool = z
   .union([z.boolean(), z.string()])
@@ -15,6 +16,8 @@ const bool = z
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  /** Optional alias; treated like production when set to "production". */
+  APP_ENV: z.string().optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   PUBLIC_WEB_ORIGIN: z.string().url().default('https://crusaderstrike.com'),
   PUBLIC_API_ORIGIN: z.string().url().default('https://api.crusaderstrike.com'),
@@ -22,10 +25,13 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   SESSION_SECRET: z.string().min(32),
   /** 32-byte AES-256-GCM key as 64 hex chars. Required always (encrypts Blizzard tokens at rest). */
-  TOKEN_ENC_KEY: z
-    .string()
-    .regex(/^[0-9a-fA-F]{64}$/, 'TOKEN_ENC_KEY must be 64 hex characters (32 bytes)'),
-  /** Default false. Startup fails when NODE_ENV=production and this is true. */
+  TOKEN_ENC_KEY: z.string().min(1),
+  /**
+   * Optional previous key for decrypt-only during rotation. Same format as TOKEN_ENC_KEY.
+   * New writes always use TOKEN_ENC_KEY.
+   */
+  TOKEN_ENC_KEY_PREVIOUS: z.string().optional(),
+  /** Default false. Startup fails when production and this is true. */
   BLIZZARD_MOCK: bool.default(false),
   BLIZZARD_CLIENT_ID: z.string().optional().default(''),
   BLIZZARD_CLIENT_SECRET: z.string().optional().default(''),
@@ -45,6 +51,7 @@ const envSchema = z.object({
 
 export type Config = {
   NODE_ENV: 'development' | 'test' | 'production';
+  isProduction: boolean;
   PORT: number;
   PUBLIC_WEB_ORIGIN: string;
   PUBLIC_API_ORIGIN: string;
@@ -52,28 +59,73 @@ export type Config = {
   DATABASE_URL: string;
   SESSION_SECRET: string;
   TOKEN_ENC_KEY: string;
+  TOKEN_ENC_KEY_PREVIOUS?: string;
   BLIZZARD_MOCK: boolean;
   BLIZZARD_CLIENT_ID: string;
   BLIZZARD_CLIENT_SECRET: string;
   BLIZZARD_REGIONS: BlizzardRegion[];
   BLIZZARD_REGION: BlizzardRegion;
-  BLIZZARD_OAUTH_AUTHORIZE_URL: string;
-  BLIZZARD_OAUTH_TOKEN_URL: string;
-  BLIZZARD_API_BASE_URL: string;
+  /** Derived OAuth authorize URL (not an env var). */
+  oauthAuthorizeUrl: string;
+  /** Derived OAuth token URL (not an env var). */
+  oauthTokenUrl: string;
+  /** Derived Game Data API base for the primary region (not an env var). */
+  apiBaseUrl: string;
   BLIZZARD_REDIRECT_URI: string;
   corsOrigins: string[];
   cookieSecure: boolean;
 };
 
+function isProdEnv(nodeEnv: string, appEnv?: string): boolean {
+  return nodeEnv === 'production' || (appEnv ?? '').toLowerCase() === 'production';
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
-    const msg = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    // Never include raw env values (could contain secrets) in the message.
+    const msg = parsed.error.issues
+      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('; ');
     throw new Error(`Invalid configuration: ${msg}`);
   }
   const v = parsed.data;
+  const production = isProdEnv(v.NODE_ENV, v.APP_ENV);
 
-  if (v.NODE_ENV === 'production' && v.BLIZZARD_MOCK) {
+  // TOKEN_ENC_KEY: always require 64 hex / 32 bytes. Production also rejects
+  // placeholder and low-entropy keys. Never include the key value in errors.
+  const formatOk = typeof v.TOKEN_ENC_KEY === 'string' && /^[0-9a-fA-F]{64}$/.test(v.TOKEN_ENC_KEY);
+  if (!formatOk) {
+    throw new Error(
+      'Invalid configuration: TOKEN_ENC_KEY must be 64 hex characters (32 bytes)',
+    );
+  }
+  const keyCheck = validateTokenEncKey(v.TOKEN_ENC_KEY);
+  if (production && !keyCheck.ok) {
+    throw new Error(`Invalid configuration: ${keyCheck.reason}`);
+  }
+  if (!production && !keyCheck.ok) {
+    // Non-prod may use the documented example key or a weak local key for compose.
+    if (
+      keyCheck.reason !== 'TOKEN_ENC_KEY must not be the example/placeholder value' &&
+      keyCheck.reason !== 'TOKEN_ENC_KEY is low-entropy'
+    ) {
+      throw new Error(`Invalid configuration: ${keyCheck.reason}`);
+    }
+  }
+  const tokenKey = v.TOKEN_ENC_KEY.toLowerCase();
+
+  let previous: string | undefined;
+  if (v.TOKEN_ENC_KEY_PREVIOUS) {
+    if (!/^[0-9a-fA-F]{64}$/.test(v.TOKEN_ENC_KEY_PREVIOUS)) {
+      throw new Error(
+        'Invalid configuration: TOKEN_ENC_KEY_PREVIOUS must be 64 hex characters (32 bytes)',
+      );
+    }
+    previous = v.TOKEN_ENC_KEY_PREVIOUS.toLowerCase();
+  }
+
+  if (production && v.BLIZZARD_MOCK) {
     throw new Error('Invalid configuration: BLIZZARD_MOCK must be false when NODE_ENV=production');
   }
 
@@ -104,25 +156,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     .filter(Boolean);
   const cookieSecure =
     v.COOKIE_SECURE ??
-    (v.NODE_ENV === 'production' || v.PUBLIC_WEB_ORIGIN.startsWith('https://'));
+    (production || v.PUBLIC_WEB_ORIGIN.startsWith('https://'));
 
   return {
     NODE_ENV: v.NODE_ENV,
+    isProduction: production,
     PORT: v.PORT,
     PUBLIC_WEB_ORIGIN: v.PUBLIC_WEB_ORIGIN,
     PUBLIC_API_ORIGIN: v.PUBLIC_API_ORIGIN,
     CORS_ORIGINS: v.CORS_ORIGINS,
     DATABASE_URL: v.DATABASE_URL,
     SESSION_SECRET: v.SESSION_SECRET,
-    TOKEN_ENC_KEY: v.TOKEN_ENC_KEY,
+    TOKEN_ENC_KEY: tokenKey,
+    TOKEN_ENC_KEY_PREVIOUS: previous,
     BLIZZARD_MOCK: Boolean(v.BLIZZARD_MOCK),
     BLIZZARD_CLIENT_ID: v.BLIZZARD_CLIENT_ID,
     BLIZZARD_CLIENT_SECRET: v.BLIZZARD_CLIENT_SECRET,
     BLIZZARD_REGIONS: regions,
     BLIZZARD_REGION: primary,
-    BLIZZARD_OAUTH_AUTHORIZE_URL: oauthAuthorizeUrlForRegion(primary),
-    BLIZZARD_OAUTH_TOKEN_URL: oauthTokenUrlForRegion(primary),
-    BLIZZARD_API_BASE_URL: apiBaseUrlForRegion(primary),
+    oauthAuthorizeUrl: oauthAuthorizeUrlForRegion(primary),
+    oauthTokenUrl: oauthTokenUrlForRegion(primary),
+    apiBaseUrl: apiBaseUrlForRegion(primary),
     BLIZZARD_REDIRECT_URI: v.BLIZZARD_REDIRECT_URI,
     corsOrigins,
     cookieSecure,

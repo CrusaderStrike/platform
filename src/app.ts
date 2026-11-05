@@ -30,6 +30,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-CSRF-Token', 'If-Match', 'Authorization'],
+    // So credentialed browser JS can read the 429 countdown on refresh.
+    exposedHeaders: ['Retry-After'],
   });
   await app.register(cookie);
 
@@ -74,7 +76,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     redirectUri,
   });
   await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
-  await registerGearRoutes(app, { pool: opts.pool });
+  await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
 
   return app;
 }
