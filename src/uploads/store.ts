@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from '../db/pool.js';
 import type { BattlegroundIn, DungeonRunIn, WorldPvpIn } from './schema.js';
-import { STATUS_RANK } from './schema.js';
+import { STATUS_RANK, normalizeRealmSql } from './schema.js';
 
 export type Db = Pool | PoolClient;
 
@@ -55,36 +55,37 @@ export function selectedCharacterIds(
   return new Set([selection.main_id, ...(selection.alt_ids ?? [])]);
 }
 
+/**
+ * Resolve character by realm + name. Realm match uses normalizeRealmSql
+ * (spaces/hyphens/apostrophes stripped, case-insensitive).
+ */
 export async function findCharacterByRealmName(
   db: Db,
   userId: string,
   realm: string,
   name: string,
 ): Promise<{ id: string; character_name: string; realm: string | null } | null> {
+  const realmNorm = normalizeRealmSql('realm');
+  const paramNorm = normalizeRealmSql('$3');
   const res = await db.query<{ id: string; character_name: string; realm: string | null }>(
     `SELECT id, character_name, realm FROM characters
      WHERE user_id = $1
        AND lower(character_name) = lower($2)
        AND realm IS NOT NULL
-       AND lower(realm) = lower($3)
+       AND ${realmNorm} = ${paramNorm}
      LIMIT 1`,
     [userId, name, realm],
   );
   return res.rows[0] ?? null;
 }
 
-function statusRankSql(column: string): string {
-  return `(CASE ${column}
-    WHEN 'in_progress' THEN 0
-    WHEN 'closed' THEN 1
-    WHEN 'completed' THEN 2
-    ELSE 0 END)`;
-}
-
 /**
- * Upsert dungeon run. Dedupe key: (character_id, addon_run_id) — no guild_id.
- * Status moves forward only (in_progress → closed → completed); never backward.
- * Forward updates count as accepted; no-op / backward re-uploads count as duplicate.
+ * Upsert dungeon run. Dedupe key: (character_id, addon_run_id).
+ *
+ * Rules:
+ * - Status moves forward only (in_progress → closed → completed); never backward.
+ * - A still-in_progress re-upload refreshes party/bosses/deaths/raw_payload (and related fields).
+ * - guild_id always updates to the caller's current upload guild on re-upload (same as PvP).
  */
 export async function upsertDungeonRun(
   db: Db,
@@ -98,66 +99,115 @@ export async function upsertDungeonRun(
   const { run } = args;
   const durationMs = run.durationSec != null ? run.durationSec * 1000 : null;
   const newRank = STATUS_RANK[run.status];
-  const oldRank = statusRankSql('dungeon_runs.status');
 
-  const res = await db.query<{ inserted: boolean }>(
-    `WITH upsert AS (
-       INSERT INTO dungeon_runs (
+  const existing = await db.query<{ status: 'in_progress' | 'closed' | 'completed'; guild_id: string }>(
+    `SELECT status, guild_id FROM dungeon_runs
+     WHERE character_id = $1 AND addon_run_id = $2`,
+    [args.characterId, run.addonRunId],
+  );
+
+  if (!existing.rows[0]) {
+    await db.query(
+      `INSERT INTO dungeon_runs (
          guild_id, user_id, character_id, addon_run_id, schema_version, game_version,
          dungeon_id, dungeon_name, difficulty, started_at, completed_at, duration_ms,
          completed, status, party, bosses, deaths, raw_payload
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb
-       )
-       ON CONFLICT (character_id, addon_run_id) DO UPDATE SET
-         guild_id = EXCLUDED.guild_id,
-         user_id = EXCLUDED.user_id,
-         schema_version = EXCLUDED.schema_version,
-         game_version = EXCLUDED.game_version,
-         dungeon_id = EXCLUDED.dungeon_id,
-         dungeon_name = EXCLUDED.dungeon_name,
-         difficulty = EXCLUDED.difficulty,
-         started_at = EXCLUDED.started_at,
-         completed_at = EXCLUDED.completed_at,
-         duration_ms = EXCLUDED.duration_ms,
-         completed = EXCLUDED.completed,
-         status = EXCLUDED.status,
-         party = EXCLUDED.party,
-         bosses = EXCLUDED.bosses,
-         deaths = EXCLUDED.deaths,
-         raw_payload = EXCLUDED.raw_payload,
-         updated_at = now()
-       WHERE ${oldRank} < $19
-       RETURNING (xmax = 0) AS inserted
-     )
-     SELECT inserted FROM upsert`,
-    [
-      args.guildId,
-      args.userId,
-      args.characterId,
-      run.addonRunId,
-      run.schemaVersion,
-      run.gameVersion,
-      run.instance.id,
-      run.instance.name,
-      run.instance.difficultyName ?? null,
-      unixToDate(run.startedAt),
-      unixToDate(run.endedAt ?? null),
-      durationMs,
-      run.completed,
-      run.status,
-      JSON.stringify(run.party),
-      JSON.stringify(run.bosses),
-      JSON.stringify(run.deaths),
-      JSON.stringify(run),
-      newRank,
-    ],
-  );
+       )`,
+      [
+        args.guildId,
+        args.userId,
+        args.characterId,
+        run.addonRunId,
+        run.schemaVersion,
+        run.gameVersion,
+        run.instance.id,
+        run.instance.name,
+        run.instance.difficultyName ?? null,
+        unixToDate(run.startedAt),
+        unixToDate(run.endedAt ?? null),
+        durationMs,
+        run.completed,
+        run.status,
+        JSON.stringify(run.party),
+        JSON.stringify(run.bosses),
+        JSON.stringify(run.deaths),
+        JSON.stringify(run),
+      ],
+    );
+    return 'accepted';
+  }
 
-  if (!res.rowCount) return 'duplicate';
-  return 'accepted';
+  const prev = existing.rows[0];
+  const oldRank = STATUS_RANK[prev.status];
+  const forward = newRank > oldRank;
+  const refreshInProgress = prev.status === 'in_progress' && run.status === 'in_progress';
+  const guildChanged = prev.guild_id !== args.guildId;
+
+  if (!forward && !refreshInProgress && !guildChanged) {
+    return 'duplicate';
+  }
+
+  if (forward || refreshInProgress) {
+    // Full field refresh; status only advances on forward.
+    await db.query(
+      `UPDATE dungeon_runs SET
+         guild_id = $1,
+         user_id = $2,
+         schema_version = $3,
+         game_version = $4,
+         dungeon_id = $5,
+         dungeon_name = $6,
+         difficulty = $7,
+         started_at = $8,
+         completed_at = $9,
+         duration_ms = $10,
+         completed = $11,
+         status = $12,
+         party = $13::jsonb,
+         bosses = $14::jsonb,
+         deaths = $15::jsonb,
+         raw_payload = $16::jsonb,
+         updated_at = now()
+       WHERE character_id = $17 AND addon_run_id = $18`,
+      [
+        args.guildId,
+        args.userId,
+        run.schemaVersion,
+        run.gameVersion,
+        run.instance.id,
+        run.instance.name,
+        run.instance.difficultyName ?? null,
+        unixToDate(run.startedAt),
+        unixToDate(run.endedAt ?? null),
+        durationMs,
+        run.completed,
+        forward ? run.status : prev.status,
+        JSON.stringify(run.party),
+        JSON.stringify(run.bosses),
+        JSON.stringify(run.deaths),
+        JSON.stringify(run),
+        args.characterId,
+        run.addonRunId,
+      ],
+    );
+    return 'accepted';
+  }
+
+  // Guild-only re-upload: move tenancy, do not count as a new accept.
+  await db.query(
+    `UPDATE dungeon_runs SET guild_id = $1, user_id = $2, updated_at = now()
+     WHERE character_id = $3 AND addon_run_id = $4`,
+    [args.guildId, args.userId, args.characterId, run.addonRunId],
+  );
+  return 'duplicate';
 }
 
+/**
+ * Insert world PvP. Dedupe (character_id, addon_pvp_id).
+ * On re-upload, guild_id always updates to the caller's current upload guild.
+ */
 export async function insertWorldPvp(
   db: Db,
   args: {
@@ -177,8 +227,8 @@ export async function insertWorldPvp(
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb
        )
        ON CONFLICT (character_id, addon_pvp_id) DO UPDATE SET
-         guild_id = EXCLUDED.guild_id
-       WHERE pvp_world_events.guild_id IS DISTINCT FROM EXCLUDED.guild_id
+         guild_id = EXCLUDED.guild_id,
+         user_id = EXCLUDED.user_id
        RETURNING (xmax = 0) AS inserted
      )
      SELECT inserted FROM upsert`,
@@ -199,10 +249,13 @@ export async function insertWorldPvp(
     ],
   );
   if (!res.rowCount) return 'duplicate';
-  // Guild-only touch still returns a row with inserted=false — count as duplicate (no double-count).
   return res.rows[0]!.inserted ? 'accepted' : 'duplicate';
 }
 
+/**
+ * Insert battleground. Dedupe (character_id, addon_pvp_id).
+ * On re-upload, guild_id always updates to the caller's current upload guild.
+ */
 export async function insertBattleground(
   db: Db,
   args: {
@@ -223,8 +276,8 @@ export async function insertBattleground(
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb
        )
        ON CONFLICT (character_id, addon_pvp_id) DO UPDATE SET
-         guild_id = EXCLUDED.guild_id
-       WHERE pvp_battlegrounds.guild_id IS DISTINCT FROM EXCLUDED.guild_id
+         guild_id = EXCLUDED.guild_id,
+         user_id = EXCLUDED.user_id
        RETURNING (xmax = 0) AS inserted
      )
      SELECT inserted FROM upsert`,

@@ -460,9 +460,15 @@ paths:
         Authenticated session upload for CrusaderStrike/addon export data (docs/run-schema.md,
         docs/pvp-schema.md from addon#15). Provide `characterId` (selected main/alt) **or**
         `realm` + `name`. Records are idempotent on `(character_id, addon_run_id|addon_pvp_id)`
-        (guild is not part of the dedupe key). Unknown envelope keys → 400; unknown keys on
-        individual records/stats are soft-ignored (stripped), listed in `ignored`, and omitted
-        from stored `raw_payload`. Unknown `schemaVersion` → 400.
+        (guild is not part of the dedupe key). **`guild_id` rule:** on every re-upload the stored
+        `guild_id` is updated to the caller's current upload guild for dungeon runs, world PvP,
+        and battlegrounds alike. Realm compare normalizes both sides (strip spaces, hyphens,
+        apostrophes; case-insensitive) so addon `GetNormalizedRealmName()` matches stored names.
+        Still-`in_progress` re-uploads refresh bosses/deaths/payload; status only moves forward
+        (`in_progress` → `closed` → `completed`). Each record is wrapped in a SAVEPOINT so one
+        insert failure rejects that record without aborting later ones. Unknown envelope keys →
+        400; unknown keys on individual records/stats are soft-ignored (stripped), listed in
+        `ignored`, and omitted from stored `raw_payload`. Unknown `schemaVersion` → 400.
         **Body size:** the 1 MiB limit covers the whole JSON body. Clients must split large
         backlogs across multiple requests (respecting array caps and the 5s cooldown).
         Battleground `stats` stores `honorable_kills` only (`killingBlows` is ignored).

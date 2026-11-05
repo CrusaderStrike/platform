@@ -314,8 +314,6 @@ describe('POST /api/v1/uploads (platform#3)', () => {
     });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({ accepted: 3 });
-    const guild1 = (first.json() as { guild_id: string }).guild_id;
-
     const userRow = await ctx.pool.query<{ user_id: string }>(`SELECT user_id FROM sessions LIMIT 1`);
     const userId = userRow.rows[0]!.user_id;
     const g2 = await ctx.pool.query<{ id: string }>(
@@ -344,7 +342,11 @@ describe('POST /api/v1/uploads (platform#3)', () => {
     expect((await ctx.pool.query(`SELECT id FROM pvp_battlegrounds`)).rowCount).toBe(1);
 
     const runGuild = await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM dungeon_runs`);
-    expect([guild1, guild2]).toContain(runGuild.rows[0]!.guild_id);
+    expect(runGuild.rows[0]!.guild_id).toBe(guild2);
+    const worldGuild = await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM pvp_world_events`);
+    expect(worldGuild.rows[0]!.guild_id).toBe(guild2);
+    const bgGuild = await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM pvp_battlegrounds`);
+    expect(bgGuild.rows[0]!.guild_id).toBe(guild2);
   });
 
   it('rejects per-record character mismatch', async () => {
@@ -521,6 +523,264 @@ describe('POST /api/v1/uploads (platform#3)', () => {
       },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+
+  it('normalizes multi-word / hyphenated / apostrophe realms on per-record match', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const ch = await pickSelectedCharacter(ctx, cookie, csrf);
+
+    const cases: Array<{ stored: string; addon: string; label: string }> = [
+      { stored: 'Pyrewood Village', addon: 'PyrewoodVillage', label: 'multi-word' },
+      { stored: 'Azjol-Nerub', addon: 'AzjolNerub', label: 'hyphenated' },
+      { stored: "Kel'Thuzad", addon: 'KelThuzad', label: 'apostrophe' },
+    ];
+
+    for (const [i, c] of cases.entries()) {
+      await ctx.pool.query(`UPDATE characters SET realm = $1 WHERE id = $2`, [c.stored, ch.id]);
+      await ctx.app.clearUploadCooldowns?.();
+      const runId = `${c.addon}|${ch.character_name}|1730100${i}|36`;
+      const res = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/uploads',
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload: {
+          schemaVersion: 1,
+          characterId: ch.id,
+          dungeonRuns: [
+            sampleRun(
+              { ...ch, realm: c.addon },
+              {
+                addonRunId: runId,
+                idempotencyKey: runId,
+                realm: c.addon,
+                character: ch.character_name,
+              },
+            ),
+          ],
+          worldPvp: [
+            sampleWorld(
+              { ...ch, realm: c.addon },
+              { addon_pvp_id: `${c.addon}|${ch.character_name}|W|1730100${i}|kill|1` },
+            ),
+          ],
+        },
+      });
+      expect(res.statusCode, c.label).toBe(200);
+      const body = res.json() as { accepted: number; rejected: unknown[] };
+      expect(body.accepted, c.label).toBe(2);
+      expect(body.rejected, c.label).toEqual([]);
+    }
+  });
+
+  it('normalizes realms on realm+name envelope lookup', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const ch = await pickSelectedCharacter(ctx, cookie, csrf);
+
+    const cases: Array<{ stored: string; addon: string; label: string }> = [
+      { stored: 'Pyrewood Village', addon: 'PyrewoodVillage', label: 'multi-word' },
+      { stored: 'Azjol-Nerub', addon: 'AzjolNerub', label: 'hyphenated' },
+      { stored: "Kel'Thuzad", addon: 'KelThuzad', label: 'apostrophe' },
+    ];
+
+    for (const [i, c] of cases.entries()) {
+      await ctx.pool.query(`UPDATE characters SET realm = $1 WHERE id = $2`, [c.stored, ch.id]);
+      await ctx.app.clearUploadCooldowns?.();
+      const runId = `${c.addon}|${ch.character_name}|1730200${i}|36`;
+      const res = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/uploads',
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload: {
+          schemaVersion: 1,
+          realm: c.addon,
+          name: ch.character_name,
+          dungeonRuns: [
+            sampleRun(
+              { ...ch, realm: c.addon },
+              {
+                addonRunId: runId,
+                idempotencyKey: runId,
+                realm: c.addon,
+                character: ch.character_name,
+              },
+            ),
+          ],
+        },
+      });
+      expect(res.statusCode, c.label).toBe(200);
+      expect(res.json(), c.label).toMatchObject({ accepted: 1, character_id: ch.id });
+    }
+  });
+
+  it('refreshes still-in_progress run data (more bosses/deaths) without status regression', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const ch = await pickSelectedCharacter(ctx, cookie, csrf);
+    const runId = `${ch.realm}|${ch.character_name}|1730300000|36`;
+
+    const first = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/uploads',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: {
+        schemaVersion: 1,
+        characterId: ch.id,
+        dungeonRuns: [
+          sampleRun(ch, {
+            addonRunId: runId,
+            idempotencyKey: runId,
+            completed: false,
+            status: 'in_progress',
+            endedAt: null,
+            durationSec: null,
+            bosses: [{ npcId: 1, name: 'Boss A', killedAt: 1730300100 }],
+            deaths: [],
+          }),
+        ],
+      },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ accepted: 1 });
+
+    await ctx.app.clearUploadCooldowns?.();
+    const second = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/uploads',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: {
+        schemaVersion: 1,
+        characterId: ch.id,
+        dungeonRuns: [
+          sampleRun(ch, {
+            addonRunId: runId,
+            idempotencyKey: runId,
+            completed: false,
+            status: 'in_progress',
+            endedAt: null,
+            durationSec: null,
+            bosses: [
+              { npcId: 1, name: 'Boss A', killedAt: 1730300100 },
+              { npcId: 2, name: 'Boss B', killedAt: 1730300500 },
+            ],
+            deaths: [{ name: ch.character_name, realm: ch.realm, time: 1730300400, source: 'trap' }],
+          }),
+        ],
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ accepted: 1, duplicate: 0 });
+
+    const row = await ctx.pool.query<{
+      status: string;
+      bosses: unknown[];
+      deaths: unknown[];
+    }>(`SELECT status, bosses, deaths FROM dungeon_runs WHERE addon_run_id = $1`, [runId]);
+    expect(row.rows[0]!.status).toBe('in_progress');
+    expect(row.rows[0]!.bosses).toHaveLength(2);
+    expect(row.rows[0]!.deaths).toHaveLength(1);
+  });
+
+  it('uses SAVEPOINT so one DB error does not poison later records or fake accepted', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const ch = await pickSelectedCharacter(ctx, cookie, csrf);
+
+    // First record: invalid FK guild via broken client would be hard; instead force a
+    // constraint failure with an oversized dungeon_name after temporarily shortening the column.
+    // Safer approach: pass a character_id that doesn't exist by monkey-patching via SQL
+    // — insert a run that will succeed, then a world PvP with a deliberately invalid
+    // result enum that zod would reject. For DB-level: use an invalid character_id FK
+    // by uploading after deleting RLS path... Use raw SQL to create a check that fails:
+    // temporarily drop FK isn't available. Use a too-long zone by bypassing zod?
+    // Simplest reliable path: spy via injecting a second record that hits UNIQUE on
+    // a forced partial insert failure — use invalid UUID for character by calling store
+    // through a poisoned character_id. We'll UPDATE the characters table mid-batch is hard.
+    //
+    // Practical approach used here: first dungeon run is fine; second dungeon run uses the
+    // same addon_run_id with a payload that would normally duplicate — that isn't an error.
+    // Instead, force insert_failed by using a world PvP with addon_pvp_id that exceeds
+    // the column length after temporarily altering... columns are text.
+    //
+    // Use a non-existent character_id FK: replace owned character's id temporarily? No.
+    // Call the route with a crafted battleground where mapId overflows INTEGER — zod
+    // already caps numbers.
+    //
+    // Use pool.query to install a trigger that fails on first pvp_world_events insert:
+    await ctx.pool.query(`
+      CREATE OR REPLACE FUNCTION test_fail_first_world_pvp() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.zone = 'FAIL_ZONE' THEN
+          RAISE EXCEPTION 'forced test failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS test_fail_world_pvp ON pvp_world_events;
+      CREATE TRIGGER test_fail_world_pvp
+        BEFORE INSERT ON pvp_world_events
+        FOR EACH ROW EXECUTE FUNCTION test_fail_first_world_pvp();
+    `);
+
+    try {
+      const goodRunId = `${ch.realm}|${ch.character_name}|1730400001|36`;
+      const goodWorldId = `${ch.realm}|${ch.character_name}|W|1730400002|kill|1`;
+      const badWorldId = `${ch.realm}|${ch.character_name}|W|1730400003|kill|1`;
+      const laterRunId = `${ch.realm}|${ch.character_name}|1730400004|36`;
+
+      const res = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/uploads',
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        payload: {
+          schemaVersion: 1,
+          characterId: ch.id,
+          dungeonRuns: [
+            sampleRun(ch, { addonRunId: goodRunId, idempotencyKey: goodRunId }),
+            sampleRun(ch, {
+              addonRunId: laterRunId,
+              idempotencyKey: laterRunId,
+              startedAt: 1730400004,
+            }),
+          ],
+          worldPvp: [
+            sampleWorld(ch, { addon_pvp_id: badWorldId, zone: 'FAIL_ZONE', time: 1730400003 }),
+            sampleWorld(ch, { addon_pvp_id: goodWorldId, zone: 'Elwynn Forest', time: 1730400002 }),
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        accepted: number;
+        duplicate: number;
+        rejected: Array<{ kind: string; id: string; reason: string }>;
+      };
+      expect(body.rejected).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'world_pvp',
+            id: badWorldId,
+            reason: 'insert_failed',
+          }),
+        ]),
+      );
+      expect(body.rejected).toHaveLength(1);
+      // Two dungeon runs + one good world PvP
+      expect(body.accepted).toBe(3);
+      expect(body.duplicate).toBe(0);
+
+      expect((await ctx.pool.query(`SELECT id FROM dungeon_runs`)).rowCount).toBe(2);
+      expect((await ctx.pool.query(`SELECT id FROM pvp_world_events`)).rowCount).toBe(1);
+      const zones = await ctx.pool.query<{ zone: string }>(`SELECT zone FROM pvp_world_events`);
+      expect(zones.rows[0]!.zone).toBe('Elwynn Forest');
+    } finally {
+      await ctx.pool.query(`
+        DROP TRIGGER IF EXISTS test_fail_world_pvp ON pvp_world_events;
+        DROP FUNCTION IF EXISTS test_fail_first_world_pvp();
+      `);
+    }
   });
 
   it('accepts a realistic addon export fixture with synced and killingBlows', async () => {

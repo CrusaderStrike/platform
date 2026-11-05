@@ -413,8 +413,24 @@ export function zodErrorsToFields(err: z.ZodError): Record<string, string> {
   return out;
 }
 
+/** Case-fold character names (trim + lower). */
 export function normName(s: string): string {
   return s.trim().toLowerCase();
+}
+
+/**
+ * Match Blizzard GetNormalizedRealmName()-style ids against display names.
+ * Strips spaces, hyphens, and apostrophes; compares case-insensitively.
+ * e.g. "Pyrewood Village" ↔ "PyrewoodVillage", "Kel'Thuzad" ↔ "KelThuzad".
+ */
+export function normalizeRealm(s: string): string {
+  return s.toLowerCase().replace(/[\s\-']/g, '');
+}
+
+/** Format a SQL expr that mirrors normalizeRealm() for column or param placeholders. */
+export function normalizeRealmSql(expr: string): string {
+  // Dollar-quoted from-set: space, hyphen, apostrophe (mirrors normalizeRealm).
+  return `translate(lower(${expr}), $$ -'$$, '')`;
 }
 
 /** addon_pvp_id is Realm|Character|W|... or Realm|Character|BG|... */
@@ -430,7 +446,10 @@ export function matchesCharacter(
   character: string,
 ): boolean {
   if (!owned.realm) return false;
-  return normName(owned.realm) === normName(realm) && normName(owned.character_name) === normName(character);
+  return (
+    normalizeRealm(owned.realm) === normalizeRealm(realm) &&
+    normName(owned.character_name) === normName(character)
+  );
 }
 
 export const STATUS_RANK: Record<'in_progress' | 'closed' | 'completed', number> = {

@@ -93,6 +93,20 @@ export async function registerUploadRoutes(app: FastifyInstance, deps: UploadDep
     try {
       await client.query('BEGIN');
 
+      /** Isolate each record so one DB error does not abort later inserts or fake an accept. */
+      async function withSavepoint<T>(label: string, fn: () => Promise<T>): Promise<T> {
+        const sp = `sp_${label.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 40)}`;
+        await client.query(`SAVEPOINT ${sp}`);
+        try {
+          const result = await fn();
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
+          return result;
+        } catch (err) {
+          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+          throw err;
+        }
+      }
+
       for (const { record: run, ignored: keys } of parsed.dungeonRuns) {
         if (keys.length) {
           ignored.push({ kind: 'dungeon_run', id: run.addonRunId, keys });
@@ -102,12 +116,14 @@ export async function registerUploadRoutes(app: FastifyInstance, deps: UploadDep
           continue;
         }
         try {
-          const outcome = await upStore.upsertDungeonRun(client, {
-            guildId,
-            userId: s.userId,
-            characterId,
-            run,
-          });
+          const outcome = await withSavepoint('dungeon_run', () =>
+            upStore.upsertDungeonRun(client, {
+              guildId,
+              userId: s.userId,
+              characterId,
+              run,
+            }),
+          );
           if (outcome === 'accepted') accepted += 1;
           else duplicate += 1;
         } catch (err) {
@@ -126,12 +142,14 @@ export async function registerUploadRoutes(app: FastifyInstance, deps: UploadDep
           continue;
         }
         try {
-          const outcome = await upStore.insertWorldPvp(client, {
-            guildId,
-            userId: s.userId,
-            characterId,
-            rec,
-          });
+          const outcome = await withSavepoint('world_pvp', () =>
+            upStore.insertWorldPvp(client, {
+              guildId,
+              userId: s.userId,
+              characterId,
+              rec,
+            }),
+          );
           if (outcome === 'accepted') accepted += 1;
           else duplicate += 1;
         } catch (err) {
@@ -150,12 +168,14 @@ export async function registerUploadRoutes(app: FastifyInstance, deps: UploadDep
           continue;
         }
         try {
-          const outcome = await upStore.insertBattleground(client, {
-            guildId,
-            userId: s.userId,
-            characterId,
-            rec,
-          });
+          const outcome = await withSavepoint('battleground', () =>
+            upStore.insertBattleground(client, {
+              guildId,
+              userId: s.userId,
+              characterId,
+              rec,
+            }),
+          );
           if (outcome === 'accepted') accepted += 1;
           else duplicate += 1;
         } catch (err) {

@@ -44,9 +44,14 @@ Or all-in-one: `docker compose up --build`.
 
 Addon data upload (platform#3) is `POST /api/v1/uploads`: session + CSRF; `characterId` or
 `realm`+`name` must resolve to a selected main/alt; schemaVersion 1; dedupe by
-`(character_id, addon_run_id|addon_pvp_id)` (guild not in the key). Envelope is strict; unknown
-keys on records/stats are soft-ignored. Whole-body limit is 1 MiB — clients split backlogs.
-World PvP and battlegrounds from addon#15 are stored; BG stats keep `honorable_kills` only.
+`(character_id, addon_run_id|addon_pvp_id)` (guild not in the key). On re-upload, `guild_id`
+always updates to the session's current upload guild for both dungeon runs and PvP.
+Realm matching strips spaces/hyphens/apostrophes (case-insensitive) so addon
+`GetNormalizedRealmName()` values match stored display names. Still-`in_progress` re-uploads
+refresh bosses/deaths/payload while status only moves forward. Each record uses a SAVEPOINT so
+one DB error does not poison the batch. Envelope is strict; unknown keys on records/stats are
+soft-ignored. Whole-body limit is 1 MiB — clients split backlogs. World PvP and battlegrounds
+from addon#15 are stored; BG stats keep `honorable_kills` only.
 
 | Method | Path | Notes |
 |---|---|---|
