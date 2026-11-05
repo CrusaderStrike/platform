@@ -10,7 +10,6 @@ import {
   profileNamespace,
   type BlizzardRegion,
 } from './regions.js';
-import { iconNameFromUrl, sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
 
 export type BlizzardClientConfig = {
   clientId: string;
@@ -42,8 +41,13 @@ export type BlizzardClient = {
   /** Fetch Forever characters across all configured regions and merge. */
   fetchForeverCharactersAll(accessToken: string): Promise<NormalizedCharacter[]>;
   /**
-   * Item Media icon HTTPS URL via static-classic-{region}.
-   * Returns null when Blizzard has no icon asset.
+   * Item Media icon HTTPS URL for Forever.
+   * Currently always returns null: Blizzard has not published an official Forever
+   * static namespace that pairs with profile-forever-{region}. Community probes
+   * suggest static-forever-{region}, but that is unconfirmed — do not call Item
+   * Media until develop.battle.net documents it.
+   * TODO(forever-static): resume GET /data/wow/media/item/{id} with the official
+   * static-forever-{region} (or whatever Blizzard publishes) once confirmed.
    */
   fetchItemIconUrl(
     accessToken: string,
@@ -205,31 +209,15 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
       }
       return all;
     },
-    async fetchItemIconUrl(accessToken, itemId, region = cfg.region) {
-      const r = isBlizzardRegion(region) ? region : cfg.region;
-      const ns = `static-classic-${r}`;
-      const url = `${apiBaseFor(r)}/data/wow/media/item/${itemId}?namespace=${encodeURIComponent(ns)}&locale=en_US`;
-      const res = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'application/json',
-          'Battlenet-Namespace': ns,
-        },
-      });
-      if (res.status === 404) return { iconUrl: null, iconName: null };
-      if (!res.ok) {
-        const err = new Error(`blizzard_item_media_${res.status}`);
-        (err as Error & { status?: number }).status = res.status;
-        throw err;
-      }
-      const body = (await res.json()) as {
-        assets?: Array<{ key?: string; value?: string }>;
-      };
-      const icon = (body.assets ?? []).find((a) => a.key === 'icon');
-      // Only https://render.worldofwarcraft.com — never cache or emit anything else.
-      const iconUrl = sanitizeBlizzardIconUrl(icon?.value);
-      const iconName = iconNameFromUrl(iconUrl);
-      return { iconUrl, iconName };
+    async fetchItemIconUrl(_accessToken, _itemId, _region = cfg.region) {
+      // Skip Item Media until Blizzard publishes an official Forever static namespace
+      // (community probes name static-forever-{region}; unconfirmed — do not guess).
+      // TODO(forever-static): call GET /data/wow/media/item/{id}?namespace=static-forever-{region}
+      // once develop.battle.net documents it; sanitize with sanitizeBlizzardIconUrl.
+      void _accessToken;
+      void _itemId;
+      void _region;
+      return { iconUrl: null, iconName: null };
     },
   };
 }

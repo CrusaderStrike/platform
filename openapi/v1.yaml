@@ -1249,11 +1249,13 @@ components:
           type: [string, 'null']
           format: uri
           description: |
-            Full HTTPS URL from Blizzard Item Media (`GET /data/wow/media/item/{itemId}`,
-            namespace `static-classic-{region}`, `assets[key=icon].value`). Platform resolves and
-            caches this. Only `https` URLs whose host is exactly `render.worldofwarcraft.com`
-            are stored or returned; anything else becomes null. Clients must not build
-            `render.worldofwarcraft.com` URLs themselves.
+            Full HTTPS URL from Blizzard Item Media when Forever static namespace is officially
+            documented. Currently always null: Blizzard has not published an official Forever
+            static namespace pairing with `profile-forever-{region}` (community probes suggest
+            `static-forever-{region}`, unconfirmed — do not guess). When enabled, platform will
+            call `GET /data/wow/media/item/{itemId}` and cache `assets[key=icon].value`, accepting
+            only `https` URLs whose host is exactly `render.worldofwarcraft.com`. Clients must not
+            build `render.worldofwarcraft.com` URLs themselves. Classic namespaces are never used.
     CharacterGearInput:
       type: object
       required: [items]

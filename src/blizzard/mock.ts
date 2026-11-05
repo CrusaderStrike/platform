@@ -183,6 +183,10 @@ export async function startMockBlizzard(
           return;
         }
         const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic')) {
+          send(res, 403, { error: 'classic_namespace_rejected' });
+          return;
+        }
         if (!ns.startsWith('profile-forever-')) {
           send(res, 403, { error: 'wrong_namespace' });
           return;
@@ -226,7 +230,13 @@ export async function startMockBlizzard(
           return;
         }
         const ns = url.searchParams.get('namespace') ?? '';
-        if (!ns.startsWith('static-classic-')) {
+        // Forever-only: reject any Classic namespace (or anything containing 'classic').
+        if (ns.toLowerCase().includes('classic')) {
+          send(res, 403, { error: 'classic_namespace_rejected' });
+          return;
+        }
+        // Accept Forever static (unconfirmed official name; mock allows it for future enablement).
+        if (!ns.startsWith('static-forever-')) {
           send(res, 403, { error: 'wrong_namespace' });
           return;
         }

@@ -293,8 +293,8 @@ describe('Blizzard OAuth + characters (#11)', () => {
       character_id: id,
       items: [{ slot: 'head', itemId: 12345, name: 'Crown' }],
     });
-    expect(putBody.items[0]!.icon_url).toMatch(/^https:\/\/render\.worldofwarcraft\.com\//);
-    expect(putBody.items[0]!.icon).toBeTruthy();
+    // Forever Item Media skipped until official static namespace is documented → icon_url null
+    expect(putBody.items[0]!.icon_url).toBeNull();
 
     const get = await ctx.app.inject({
       method: 'GET',
@@ -304,10 +304,9 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(get.statusCode).toBe(200);
     expect(get.json()).toMatchObject({
       character_id: id,
-      items: [{ itemId: 12345, icon_url: putBody.items[0]!.icon_url }],
+      items: [{ itemId: 12345, icon_url: null }],
     });
 
-    // Cache hit: second PUT with same itemId does not need a new upstream shape
     const put2 = await ctx.app.inject({
       method: 'PUT',
       url: `/api/v1/characters/${id}/gear`,
@@ -316,7 +315,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(put2.statusCode).toBe(200);
     expect(put2.json()).toMatchObject({
-      items: [{ itemId: 12345, icon_url: putBody.items[0]!.icon_url }],
+      items: [{ itemId: 12345, icon_url: null }],
     });
   });
 
@@ -372,7 +371,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
   });
 
 
-  it('rejects invalid Blizzard icon media URLs (http/wrong/lookalike/malformed)', async () => {
+  it('gear icon_url stays null while Forever Item Media is skipped', async () => {
     ctx = await startTestApp();
     const { cookie, csrf } = await signIn(ctx);
     const chars = (
@@ -380,29 +379,22 @@ describe('Blizzard OAuth + characters (#11)', () => {
     ).json() as { characters: Array<{ id: string }> };
     const id = chars.characters[0]!.id;
 
-    const cases = [
-      { itemId: 90001, label: 'http' },
-      { itemId: 90002, label: 'wrong host' },
-      { itemId: 90003, label: 'lookalike' },
-      { itemId: 90004, label: 'malformed' },
-    ];
-    for (const c of cases) {
-      const put = await ctx.app.inject({
-        method: 'PUT',
-        url: `/api/v1/characters/${id}/gear`,
-        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
-        payload: { items: [{ slot: 'head', itemId: c.itemId, name: c.label }] },
-      });
-      expect(put.statusCode, c.label).toBe(200);
-      const items = (put.json() as { items: Array<{ icon_url: string | null }> }).items;
-      expect(items[0]!.icon_url, c.label).toBeNull();
-      const cached = await ctx.pool.query<{ icon_url: string | null }>(
-        `SELECT icon_url FROM item_icon_cache WHERE item_id = $1`,
-        [c.itemId],
-      );
-      // Cached null is fine; must never store the invalid URL string
-      expect(cached.rows[0]?.icon_url ?? null, c.label).toBeNull();
-    }
+    const put = await ctx.app.inject({
+      method: 'PUT',
+      url: `/api/v1/characters/${id}/gear`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { items: [{ slot: 'head', itemId: 90001, name: 'skipped' }] },
+    });
+    expect(put.statusCode).toBe(200);
+    expect((put.json() as { items: Array<{ icon_url: string | null }> }).items[0]!.icon_url).toBeNull();
+    // Client must not resolve Item Media while Forever static namespace is unconfirmed.
+    const mediaHits = await ctx.pool.query(`SELECT count(*)::int AS n FROM item_icon_cache`);
+    // May cache null lookup or skip entirely depending on resolve path; never a classic URL.
+    const bad = await ctx.pool.query(
+      `SELECT icon_url FROM item_icon_cache WHERE icon_url IS NOT NULL AND icon_url ILIKE '%classic%'`,
+    );
+    expect(bad.rowCount).toBe(0);
+    void mediaHits;
   });
 
   it('refresh with non-v1 token → 401 and tokens cleared', async () => {
@@ -539,6 +531,36 @@ describe('token encryption', () => {
     expect(validateTokenEncKey(TEST_TOKEN_ENC_KEY).ok).toBe(false);
     expect(validateTokenEncKey(PROD_SAFE_TOKEN_ENC_KEY).ok).toBe(true);
     expect(validateTokenEncKey('short').ok).toBe(false);
+  });
+});
+
+describe('mock Blizzard rejects classic namespaces', () => {
+  let ctx: TestCtx;
+
+  afterEach(async () => {
+    if (ctx) await ctx.stop();
+  });
+
+  it('Item Media with classic in namespace → 403', async () => {
+    ctx = await startTestApp();
+    await signIn(ctx);
+    const row = await ctx.pool.query<{ access_token: string }>(`SELECT access_token FROM users LIMIT 1`);
+    const access = decryptSecret(row.rows[0]!.access_token, TEST_TOKEN_ENC_KEY);
+
+    for (const ns of [
+      'static-classic-us',
+      'static-classic1x-us',
+      'profile-classic-us',
+      'dynamic-classic-forever-us',
+    ]) {
+      const res = await fetch(
+        `${ctx.mock.apiBaseUrl}/data/wow/media/item/12345?namespace=${encodeURIComponent(ns)}&locale=en_US`,
+        { headers: { Authorization: `Bearer ${access}`, Accept: 'application/json' } },
+      );
+      expect(res.status, ns).toBe(403);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error, ns).toBe('classic_namespace_rejected');
+    }
   });
 });
 

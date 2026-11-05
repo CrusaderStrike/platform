@@ -72,7 +72,7 @@ function validateItems(items: unknown): EquippedItemIn[] {
       quality: it.quality ?? null,
       ilvl: it.ilvl ?? null,
       icon: it.icon ?? null,
-      // Client-supplied icon_url is ignored; platform resolves from Blizzard Item Media.
+      // Client-supplied icon_url is ignored; platform would resolve from Forever Item Media when official static namespace is documented (currently always null).
     });
   }
   return out;
