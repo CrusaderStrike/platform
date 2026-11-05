@@ -127,6 +127,58 @@ describe('Forever items catalog', () => {
     expect(GEAR_SLOTS).toHaveLength(20);
   });
 
+  it('GET /api/v1/items?slot=ranged returns no AMMO items (ammo is its own slot)', async () => {
+    await items.upsertItem(ctx.pool, {
+      itemId: 22316,
+      name: 'Test Relic',
+      slot: 'ranged',
+      slotAliases: [],
+      inventoryType: 'RELIC',
+      quality: 'common',
+      itemLevel: 1,
+      requiredLevel: 0,
+      armorType: null,
+      itemClass: 4,
+      itemSubclass: 7,
+      stats: null,
+      iconUrl: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_relic.jpg',
+      iconName: 'inv_relic',
+      region: 'us',
+    });
+    await items.upsertItem(ctx.pool, {
+      itemId: 2512,
+      name: 'Rough Arrow',
+      slot: 'ammo',
+      slotAliases: [],
+      inventoryType: 'AMMO',
+      quality: 'common',
+      itemLevel: 1,
+      requiredLevel: 0,
+      armorType: null,
+      itemClass: 6,
+      itemSubclass: 2,
+      stats: null,
+      iconUrl: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_ammo_arrow_01.jpg',
+      iconName: 'inv_ammo_arrow_01',
+      region: 'us',
+    });
+    await items.setMeta(ctx.pool, { buildId: 'ammo-slot-test', itemCount: 2, region: 'us' });
+
+    const ranged = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=ranged' });
+    expect(ranged.statusCode).toBe(200);
+    const rangedBody = ranged.json() as { items: Array<{ item_id: number; slot: string; inventory_type: string }> };
+    expect(rangedBody.items.every((i) => i.inventory_type !== 'AMMO')).toBe(true);
+    expect(rangedBody.items.every((i) => i.slot !== 'ammo')).toBe(true);
+    expect(rangedBody.items.map((i) => i.item_id)).toContain(22316);
+    expect(rangedBody.items.map((i) => i.item_id)).not.toContain(2512);
+
+    const ammo = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=ammo' });
+    expect(ammo.statusCode).toBe(200);
+    const ammoBody = ammo.json() as { items: Array<{ item_id: number; slot: string; inventory_type: string }> };
+    expect(ammoBody.items).toHaveLength(1);
+    expect(ammoBody.items[0]).toMatchObject({ item_id: 2512, slot: 'ammo', inventory_type: 'AMMO' });
+  });
+
   it('decideCatalogMetaActivation refuses setMeta on --only or item_errors > 0', async () => {
     const { decideCatalogMetaActivation } = await import('../src/items/import-meta-policy.js');
     expect(decideCatalogMetaActivation({ partialOnly: false, itemErrors: 0 })).toEqual({ setMeta: true });
