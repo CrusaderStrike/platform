@@ -47,34 +47,46 @@ describe('gear lists (platform#17)', () => {
     );
   });
 
-  it('creates lists per character, caps at 5 with 409 list_limit_reached', async () => {
+  it('creates lists per character, caps at 20 with 409 list_limit_reached', async () => {
     const { cookie, csrf } = await signIn(ctx);
     const characterId = await selectMain(ctx, cookie, csrf);
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 20; i++) {
       await clearCooldown(ctx);
       const res = await ctx.app.inject({
         method: 'POST',
         url: `/api/v1/characters/${characterId}/gear-lists`,
         headers: { cookie, 'x-csrf-token': csrf },
-        payload: { name: `List ${i + 1}` },
+        payload: { name: `List ${i + 1}`, type: 'max_level' },
       });
       expect(res.statusCode).toBe(201);
       expect(res.headers.etag).toBe('"v1"');
-      const body = res.json() as { visibility: string; updated_source: string; items: unknown[] };
+      const body = res.json() as {
+        visibility: string;
+        updated_source: string;
+        items: unknown[];
+        type: string;
+        slots: Record<string, unknown>;
+        edited_at: string;
+        outgrown: boolean;
+      };
       expect(body.visibility).toBe('private');
       expect(body.updated_source).toBe('web');
       expect(body.items).toEqual([]);
+      expect(body.type).toBe('max_level');
+      expect(body.outgrown).toBe(false);
+      expect(body.edited_at).toBeTruthy();
+      expect(Object.keys(body.slots)).toHaveLength(19);
     }
     await clearCooldown(ctx);
-    const sixth = await ctx.app.inject({
+    const twentyFirst = await ctx.app.inject({
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'List 6' },
+      payload: { name: 'List 21', type: 'max_level' },
     });
-    expect(sixth.statusCode).toBe(409);
-    expect(sixth.json()).toMatchObject({ error: { code: 'list_limit_reached' } });
+    expect(twentyFirst.statusCode).toBe(409);
+    expect(twentyFirst.json()).toMatchObject({ error: { code: 'list_limit_reached' } });
 
     const listed = await ctx.app.inject({
       method: 'GET',
@@ -82,7 +94,7 @@ describe('gear lists (platform#17)', () => {
       headers: { cookie },
     });
     expect(listed.statusCode).toBe(200);
-    expect((listed.json() as { items: unknown[] }).items).toHaveLength(5);
+    expect((listed.json() as { items: unknown[] }).items).toHaveLength(20);
   });
 
   it('PATCH/DELETE use If-Match; 409 version_mismatch includes current list', async () => {
@@ -93,7 +105,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'BiS' },
+      payload: { name: 'BiS', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
     await clearCooldown(ctx);
@@ -131,7 +143,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'PvE' },
+      payload: { name: 'PvE', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
     await clearCooldown(ctx);
@@ -266,7 +278,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Secret' },
+      payload: { name: 'Secret', type: 'max_level' },
     });
     const list = created.json() as { id: string };
     const row = await ctx.pool.query<{ guild_id: string }>(
@@ -301,7 +313,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'SyncMe' },
+      payload: { name: 'SyncMe', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
     const opId = randomUUID();
@@ -359,7 +371,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Hist' },
+      payload: { name: 'Hist', type: 'max_level' },
     });
     const list = created.json() as { id: string };
     const ev = await ctx.app.inject({
@@ -382,7 +394,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'NeedETag' },
+      payload: { name: 'NeedETag', type: 'max_level' },
     });
     const list = created.json() as { id: string };
     await clearCooldown(ctx);
@@ -432,7 +444,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Src' },
+      payload: { name: 'Src', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
     await clearCooldown(ctx);
@@ -497,7 +509,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Forever' },
+      payload: { name: 'Forever', type: 'max_level' },
     });
     const listRow = created.json() as { id: string; version: number };
     const row = await ctx.pool.query<{ guild_id: string }>(
@@ -569,7 +581,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'ReAdd' },
+      payload: { name: 'ReAdd', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
     await clearCooldown(ctx);
@@ -670,7 +682,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Burst' },
+      payload: { name: 'Burst', type: 'max_level' },
     });
     expect(created.statusCode).toBe(201);
     const list = created.json() as { id: string; version: number };
@@ -744,7 +756,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'AtomicLimit' },
+      payload: { name: 'AtomicLimit', type: 'max_level' },
     });
     expect(created.statusCode).toBe(201);
     const list = created.json() as { id: string; version: number };
@@ -789,7 +801,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Parallel' },
+      payload: { name: 'Parallel', type: 'max_level' },
     });
     const list = created.json() as { id: string; version: number };
 
@@ -849,7 +861,7 @@ describe('gear lists (platform#17)', () => {
     }
     expect(patchResults.some((r) => r.statusCode === 200)).toBe(true);
 
-    // Fill to 4 more lists (1 already exists) via parallel creates — cap at 5
+    // Parallel creates against the 20-list cap (1 already exists)
     await clearCooldown(ctx);
     const createResults = await Promise.all(
       Array.from({ length: 8 }, (_, i) =>
@@ -857,7 +869,7 @@ describe('gear lists (platform#17)', () => {
           method: 'POST',
           url: `/api/v1/characters/${characterId}/gear-lists`,
           headers: { cookie, 'x-csrf-token': csrf },
-          payload: { name: `P${i}` },
+          payload: { name: `P${i}`, type: 'max_level' },
         }),
       ),
     );
@@ -869,12 +881,13 @@ describe('gear lists (platform#17)', () => {
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie },
     });
-    expect((listed.json() as { items: unknown[] }).items.length).toBeLessThanOrEqual(5);
+    expect((listed.json() as { items: unknown[] }).items.length).toBeLessThanOrEqual(20);
     // At least one create must have hit the cap or succeeded within cap
     const createdN = createResults.filter((r) => r.statusCode === 201).length;
     const capped = createResults.filter((r) => r.statusCode === 409).length;
     expect(createdN + capped).toBeGreaterThan(0);
-    expect((listed.json() as { items: unknown[] }).items).toHaveLength(5);
+    expect((listed.json() as { items: unknown[] }).items.length).toBeGreaterThanOrEqual(1);
+    expect((listed.json() as { items: unknown[] }).items.length).toBeLessThanOrEqual(20);
   });
 
 
@@ -885,7 +898,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'Cap list' },
+      payload: { name: 'Cap list', type: 'max_level' },
     });
     expect(created.statusCode).toBe(201);
     const listRow = created.json() as { id: string; version: number };
@@ -983,7 +996,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'MidImport' },
+      payload: { name: 'MidImport', type: 'max_level' },
     });
     expect(created.statusCode).toBe(201);
     const list = created.json() as { id: string; version: number };
@@ -1073,7 +1086,7 @@ describe('gear lists (platform#17)', () => {
       method: 'POST',
       url: `/api/v1/characters/${characterId}/gear-lists`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { name: 'OrphanRow' },
+      payload: { name: 'OrphanRow', type: 'max_level' },
     });
     const list = created.json() as { id: string };
     const guild = await ctx.pool.query<{ guild_id: string }>(

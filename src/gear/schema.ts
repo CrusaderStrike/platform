@@ -11,7 +11,7 @@ import { normalizeRealm, normalizeRealmSql } from '../uploads/schema.js';
 export { normalizeRealm, normalizeRealmSql };
 
 export const GEAR_SCHEMA_VERSION = 1;
-export const MAX_LISTS_PER_CHARACTER = 5;
+export const MAX_LISTS_PER_CHARACTER = 20;
 export const MAX_OPS_PER_REQUEST = 200;
 /** Cap on sum of ops across all lists in one /sync body. */
 export const MAX_SYNC_TOTAL_OPS = 500;
@@ -20,7 +20,7 @@ export const MAX_LIST_NAME = 64;
 export const MAX_NOTE = 200;
 export const MAX_ITEMS_PER_LIST = 100;
 export const MAX_PRIORITY = 50;
-/** HTTP 409 when creating a 6th active list for a character. */
+/** HTTP 409 when creating a 21st active list for a character. */
 export const LIST_LIMIT_CODE = 'list_limit_reached';
 /** HTTP 422 when item_id is not Forever loot (catalog check). */
 export const ITEM_NOT_FOREVER_CODE = 'item_not_forever';
@@ -55,11 +55,18 @@ export type EventType =
   | 'GearListCreated'
   | 'GearListRenamed'
   | 'GearListDeleted'
+  | 'GearListMetaChanged'
   | 'GearItemAdded'
   | 'GearItemRemoved'
   | 'GearItemReprioritized'
   | 'GearItemObtained'
+  | 'GearSlotSet'
+  | 'GearSlotCleared'
   | 'GearOpRejected';
+
+export const GEAR_SET_TYPES = ['leveling', 'max_level'] as const;
+export type GearSetType = (typeof GEAR_SET_TYPES)[number];
+export const MAX_ROLE_SPEC = 32;
 
 const OP_KEYS = new Set([
   'op_id',
