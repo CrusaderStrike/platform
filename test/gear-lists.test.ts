@@ -1130,4 +1130,385 @@ describe('gear lists (platform#17)', () => {
     expect(body.list.items).toEqual([]);
   });
 
+  it('set_slot / clear_slot: replace, no-op, stale base_version, dedupe, Forever, legacy ops still work', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+
+    await foreverItems.upsertItem(ctx.pool, {
+      itemId: 16846,
+      name: "Giantstalker's Helmet",
+      slot: 'head',
+      slotAliases: [],
+      inventoryType: 'HEAD',
+      quality: 'epic',
+      itemLevel: 66,
+      requiredLevel: 60,
+      armorType: 'mail',
+      itemClass: 4,
+      itemSubclass: 3,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    await foreverItems.upsertItem(ctx.pool, {
+      itemId: 16900,
+      name: "Stormrage Cover",
+      slot: 'head',
+      slotAliases: [],
+      inventoryType: 'HEAD',
+      quality: 'epic',
+      itemLevel: 76,
+      requiredLevel: 60,
+      armorType: 'leather',
+      itemClass: 4,
+      itemSubclass: 2,
+      stats: null,
+      iconUrl: null,
+      iconName: null,
+      region: 'us',
+    });
+    await foreverItems.setMeta(ctx.pool, { buildId: 'slot-ops-1', itemCount: 2, region: 'us' });
+
+    await clearCooldown(ctx);
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'Armory', type: 'max_level' },
+    });
+    expect(created.statusCode).toBe(201);
+    let list = created.json() as {
+      id: string;
+      version: number;
+      slots: Record<string, number | null>;
+      items: { slot: string; item_id: number; priority: number }[];
+    };
+    expect(list.version).toBe(1);
+
+    // set_slot into empty slot
+    await clearCooldown(ctx);
+    const setId = randomUUID();
+    const set1 = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: setId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: list.version,
+          },
+        ],
+      },
+    });
+    expect(set1.statusCode).toBe(200);
+    let body = set1.json() as {
+      applied: string[];
+      duplicates: string[];
+      conflicts: unknown[];
+      version: number;
+      list: {
+        version: number;
+        slots: Record<string, number | null>;
+        items: { slot: string; item_id: number; priority: number }[];
+      };
+    };
+    expect(body.conflicts).toEqual([]);
+    expect(body.applied).toEqual([setId]);
+    expect(body.duplicates).toEqual([]);
+    expect(body.version).toBe(2);
+    expect(body.list.slots.head).toBe(16846);
+    expect(body.list.items).toEqual([
+      expect.objectContaining({ slot: 'head', item_id: 16846, priority: 1 }),
+    ]);
+    list = { ...body.list, id: list.id };
+
+    // GearSlotSet event recorded
+    const events1 = await ctx.pool.query<{ event_type: string; payload: { slot: string; item_id: number } }>(
+      `SELECT event_type, payload FROM gear_list_events WHERE list_id = $1 AND seq = 2`,
+      [list.id],
+    );
+    expect(events1.rows[0]).toMatchObject({
+      event_type: 'GearSlotSet',
+      payload: { slot: 'head', item_id: 16846 },
+    });
+
+    // no-op set_slot (unchanged) — applied, no version bump
+    await clearCooldown(ctx);
+    const noopSetId = randomUUID();
+    const noopSet = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: noopSetId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: list.version,
+          },
+        ],
+      },
+    });
+    expect(noopSet.statusCode).toBe(200);
+    body = noopSet.json() as typeof body;
+    expect(body.applied).toEqual([noopSetId]);
+    expect(body.conflicts).toEqual([]);
+    expect(body.version).toBe(2);
+    expect(body.list.version).toBe(2);
+
+    // replace-in-slot: different item clears prior
+    await clearCooldown(ctx);
+    const replaceId = randomUUID();
+    const replace = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: replaceId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16900,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(replace.statusCode).toBe(200);
+    body = replace.json() as typeof body;
+    expect(body.applied).toEqual([replaceId]);
+    expect(body.version).toBe(3);
+    expect(body.list.slots.head).toBe(16900);
+    expect(body.list.items).toHaveLength(1);
+    expect(body.list.items[0]).toMatchObject({ item_id: 16900, slot: 'head' });
+    list = { ...body.list, id: list.id };
+
+    // stale base_version on set_slot
+    await clearCooldown(ctx);
+    const staleId = randomUUID();
+    const stale = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: staleId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 1,
+          },
+        ],
+      },
+    });
+    expect(stale.statusCode).toBe(200);
+    body = stale.json() as typeof body;
+    expect(body.applied).toEqual([]);
+    expect(body.conflicts).toEqual([
+      expect.objectContaining({ op_id: staleId, reason: 'stale_base_version' }),
+    ]);
+    expect(body.version).toBe(4);
+    expect(body.list.slots.head).toBe(16900);
+
+    // op_id dedupe: resend the successful replace
+    await clearCooldown(ctx);
+    const dedupe = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: replaceId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16900,
+            base_version: 3,
+          },
+        ],
+      },
+    });
+    expect(dedupe.statusCode).toBe(200);
+    const dedupeBody = dedupe.json() as { applied: string[]; duplicates: string[]; version: number };
+    expect(dedupeBody.duplicates).toEqual([replaceId]);
+    expect(dedupeBody.applied).toEqual([]);
+    expect(dedupeBody.version).toBe(4);
+
+    // clear_slot removes items + GearSlotCleared
+    await clearCooldown(ctx);
+    const clearId = randomUUID();
+    const clear = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: clearId,
+            type: 'clear_slot',
+            slot: 'head',
+            base_version: 4,
+          },
+        ],
+      },
+    });
+    expect(clear.statusCode).toBe(200);
+    body = clear.json() as typeof body;
+    expect(body.applied).toEqual([clearId]);
+    expect(body.version).toBe(5);
+    expect(body.list.slots.head).toBeNull();
+    expect(body.list.items).toEqual([]);
+    const eventsClear = await ctx.pool.query<{ event_type: string; payload: { slot: string } }>(
+      `SELECT event_type, payload FROM gear_list_events WHERE list_id = $1 AND seq = 5`,
+      [list.id],
+    );
+    expect(eventsClear.rows[0]).toMatchObject({
+      event_type: 'GearSlotCleared',
+      payload: { slot: 'head' },
+    });
+    list = { ...body.list, id: list.id };
+
+    // clear_slot no-op when already empty
+    await clearCooldown(ctx);
+    const noopClearId = randomUUID();
+    const noopClear = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: noopClearId,
+            type: 'clear_slot',
+            slot: 'head',
+            base_version: 5,
+          },
+        ],
+      },
+    });
+    expect(noopClear.statusCode).toBe(200);
+    body = noopClear.json() as typeof body;
+    expect(body.applied).toEqual([noopClearId]);
+    expect(body.version).toBe(5);
+
+    // Forever reject on set_slot
+    await clearCooldown(ctx);
+    const foreverId = randomUUID();
+    const foreverReject = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: foreverId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 999001,
+            base_version: 5,
+          },
+        ],
+      },
+    });
+    expect(foreverReject.statusCode).toBe(200);
+    body = foreverReject.json() as typeof body;
+    expect(body.conflicts).toEqual([
+      expect.objectContaining({ op_id: foreverId, reason: 'item_not_forever' }),
+    ]);
+    expect(body.version).toBe(6);
+
+    // Legacy add_item still works alongside armory ops (addon sync compatibility)
+    await clearCooldown(ctx);
+    const addId = randomUUID();
+    const legacy = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: addId,
+            type: 'add_item',
+            slot: 'neck',
+            item_id: 16846,
+            priority: 2,
+            base_version: 6,
+          },
+        ],
+      },
+    });
+    expect(legacy.statusCode).toBe(200);
+    body = legacy.json() as typeof body;
+    expect(body.applied).toEqual([addId]);
+    expect(body.conflicts).toEqual([]);
+    expect(body.list.items.some((i) => i.slot === 'neck' && i.item_id === 16846)).toBe(true);
+
+    // set_slot replaces multi-item wishlist slot with one
+    await clearCooldown(ctx);
+    const add2 = randomUUID();
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: add2,
+            type: 'add_item',
+            slot: 'neck',
+            item_id: 16900,
+            priority: 1,
+            base_version: body.version,
+          },
+        ],
+      },
+    });
+    await clearCooldown(ctx);
+    const getBefore = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/v1/gear-lists/${list.id}`,
+      headers: { cookie },
+    });
+    const before = getBefore.json() as {
+      version: number;
+      items: { slot: string; item_id: number }[];
+    };
+    expect(before.items.filter((i) => i.slot === 'neck')).toHaveLength(2);
+
+    await clearCooldown(ctx);
+    const armoryId = randomUUID();
+    const armory = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: armoryId,
+            type: 'set_slot',
+            slot: 'neck',
+            item_id: 16846,
+            base_version: before.version,
+          },
+        ],
+      },
+    });
+    expect(armory.statusCode).toBe(200);
+    body = armory.json() as typeof body;
+    expect(body.applied).toEqual([armoryId]);
+    expect(body.list.items.filter((i) => i.slot === 'neck')).toEqual([
+      expect.objectContaining({ item_id: 16846, priority: 1 }),
+    ]);
+  });
+
+
 });

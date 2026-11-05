@@ -1104,6 +1104,12 @@ paths:
         reprioritize/obtain; a stale `base_version` loses. Losers are recorded as
         `GearOpRejected` and returned in `conflicts[]`.
 
+        **Armory ops (platform#45):** `set_slot` replaces all items in a slot with one
+        Forever `item_id` (priority 1) and emits `GearSlotSet`; no-op (no version bump)
+        when the slot already holds only that item. `clear_slot` removes every item in
+        the slot and emits `GearSlotCleared`; no-op when already empty. Wishlist ops
+        (`add_item` / `remove_item` / …) stay valid for addon sync.
+
         **`base_version` (web):** the list `version` the client last observed (from GET,
         create, or the previous ops/sync response). Set every web op's `base_version` to
         that value. If the server has applied a later event touching the same item, the op
@@ -2160,14 +2166,22 @@ components:
           items: { $ref: '#/components/schemas/GearItem' }
     GearOp:
       type: object
-      required: [op_id, type, slot, item_id, base_version]
+      required: [op_id, type, slot, base_version]
       additionalProperties: true  # unknown keys soft-ignored
       properties:
         op_id: { type: string, format: uuid, description: 'Idempotency key (guild_id, op:<op_id>).' }
         list_id: { type: string, format: uuid, description: 'Required in flat /sync ops; optional when nested under lists.' }
-        type: { type: string, enum: [add_item, remove_item, reprioritize_item, mark_obtained] }
+        type:
+          type: string
+          enum: [add_item, remove_item, reprioritize_item, mark_obtained, set_slot, clear_slot]
+          description: |
+            `set_slot` / `clear_slot` are armory replace-in-slot ops (platform#45).
+            Old wishlist ops remain valid for addon sync.
         slot: { $ref: '#/components/schemas/GearSlot' }
-        item_id: { type: integer, minimum: 1 }
+        item_id:
+          type: integer
+          minimum: 1
+          description: Required for add/remove/reprioritize/mark_obtained/set_slot; omit for clear_slot.
         priority: { type: integer, minimum: 1, maximum: 50, description: 'Required for add_item and reprioritize_item.' }
         note: { type: string, maxLength: 200 }
         obtained: { type: boolean, description: 'Required for mark_obtained; false = undo.' }
@@ -2199,6 +2213,8 @@ components:
             - { $ref: '#/components/schemas/GearEventPayloadItemRemoved' }
             - { $ref: '#/components/schemas/GearEventPayloadItemReprioritized' }
             - { $ref: '#/components/schemas/GearEventPayloadItemObtained' }
+            - { $ref: '#/components/schemas/GearEventPayloadSlotSet' }
+            - { $ref: '#/components/schemas/GearEventPayloadSlotCleared' }
             - { $ref: '#/components/schemas/GearEventPayloadRejected' }
         actor: { oneOf: [{ $ref: '#/components/schemas/GearEventActor' }, { type: 'null' }] }
         source: { type: string, enum: [web, addon, companion, export, system] }
@@ -2249,6 +2265,19 @@ components:
         item_id: { type: integer }
         obtained: { type: boolean, description: false = undo }
         run_id: { type: [string, 'null'], format: uuid }
+    GearEventPayloadSlotSet:
+      type: object
+      required: [slot, item_id]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+      description: Emitted by set_slot (and create `slots`); replace-in-slot at priority 1.
+    GearEventPayloadSlotCleared:
+      type: object
+      required: [slot]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+      description: Emitted by clear_slot; removes all items in the slot.
     GearEventPayloadRejected:
       type: object
       required: [op_id, reason]

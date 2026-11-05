@@ -492,6 +492,23 @@ async function lastItemTouchSeq(
   return r.rows[0] ? Number(r.rows[0].seq) : 0;
 }
 
+/** Latest seq that touched any item in `slot` (incl. GearSlotSet / GearSlotCleared). */
+async function lastSlotTouchSeq(db: Db, listId: string, slot: string): Promise<number> {
+  const r = await db.query<{ seq: string }>(
+    `SELECT seq FROM gear_list_events
+     WHERE list_id = $1
+       AND event_type IN (
+         'GearItemAdded','GearItemRemoved','GearItemReprioritized','GearItemObtained',
+         'GearSlotSet','GearSlotCleared'
+       )
+       AND (payload->>'slot') = $2
+     ORDER BY seq DESC
+     LIMIT 1`,
+    [listId, slot],
+  );
+  return r.rows[0] ? Number(r.rows[0].seq) : 0;
+}
+
 export async function applyOps(
   db: Db,
   args: {
@@ -541,9 +558,12 @@ export async function applyOps(
       continue;
     }
 
-    // Allowlist gates ops that introduce an item reference (add_item). Mutations of
-    // rows already on the list must still work if the id is absent from forever_items.
-    if (op.type === 'add_item' && !(await foreverCheck(op.item_id))) {
+    // Allowlist gates ops that introduce an item reference (add_item / set_slot).
+    // Mutations of rows already on the list must still work if absent from forever_items.
+    if (
+      (op.type === 'add_item' || op.type === 'set_slot') &&
+      !(await foreverCheck(op.item_id!))
+    ) {
       // Forever reject still consumes a seq + bumps list.version so later writes don't collide.
       version += 1;
       await appendEvent(db, {
@@ -567,9 +587,134 @@ export async function applyOps(
       continue;
     }
 
+    // --- set_slot / clear_slot (armory replace-in-slot; additive; old op types unchanged) ---
+    if (op.type === 'set_slot' || op.type === 'clear_slot') {
+      const items = await getItems(db, list.id);
+      const inSlot = items.filter((i) => i.slot === op.slot);
+      const lastTouch = await lastSlotTouchSeq(db, list.id, op.slot);
+
+      if (lastTouch > op.base_version) {
+        version += 1;
+        await appendEvent(db, {
+          guildId: list.guild_id,
+          listId: list.id,
+          seq: version,
+          eventType: 'GearOpRejected',
+          payload: {
+            op_id: op.op_id,
+            reason: 'stale_base_version',
+            winning_seq: lastTouch,
+            slot: op.slot,
+            item_id: op.item_id ?? null,
+          },
+          source,
+          actor: args.actor,
+          idempotencyKey: idem,
+          occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+        });
+        conflicts.push({
+          op_id: op.op_id,
+          reason: 'stale_base_version',
+          winning_version: lastTouch,
+          message: 'Stale base_version.',
+        });
+        await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+        list = (await getList(db, list.id))!;
+        continue;
+      }
+
+      if (op.type === 'clear_slot') {
+        if (inSlot.length === 0) {
+          // Already empty — true no-op (no event / version bump). Retries are naturally idempotent.
+          applied.push(op.op_id);
+          continue;
+        }
+        version += 1;
+        await appendEvent(db, {
+          guildId: list.guild_id,
+          listId: list.id,
+          seq: version,
+          eventType: 'GearSlotCleared',
+          payload: { slot: op.slot },
+          source,
+          actor: args.actor,
+          idempotencyKey: idem,
+          occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+        });
+        await db.query(`DELETE FROM gear_list_items WHERE list_id = $1 AND slot = $2`, [
+          list.id,
+          op.slot,
+        ]);
+        await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+        applied.push(op.op_id);
+        list = (await getList(db, list.id))!;
+        continue;
+      }
+
+      // set_slot
+      const itemId = op.item_id!;
+      const unchanged = inSlot.length === 1 && inSlot[0]!.item_id === itemId;
+      if (unchanged) {
+        applied.push(op.op_id);
+        continue;
+      }
+      if (inSlot.length === 0 && items.length >= MAX_ITEMS_PER_LIST) {
+        version += 1;
+        await appendEvent(db, {
+          guildId: list.guild_id,
+          listId: list.id,
+          seq: version,
+          eventType: 'GearOpRejected',
+          payload: {
+            op_id: op.op_id,
+            reason: 'list_items_limit',
+            slot: op.slot,
+            item_id: itemId,
+          },
+          source,
+          actor: args.actor,
+          idempotencyKey: idem,
+          occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+        });
+        conflicts.push({
+          op_id: op.op_id,
+          reason: 'list_items_limit',
+          message: 'list_items_limit',
+        });
+        await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+        list = (await getList(db, list.id))!;
+        continue;
+      }
+      version += 1;
+      await appendEvent(db, {
+        guildId: list.guild_id,
+        listId: list.id,
+        seq: version,
+        eventType: 'GearSlotSet',
+        payload: { slot: op.slot, item_id: itemId },
+        source,
+        actor: args.actor,
+        idempotencyKey: idem,
+        occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+      });
+      await db.query(`DELETE FROM gear_list_items WHERE list_id = $1 AND slot = $2`, [
+        list.id,
+        op.slot,
+      ]);
+      await db.query(
+        `INSERT INTO gear_list_items (guild_id, list_id, slot, item_id, priority, note, obtained, obtained_at)
+         VALUES ($1,$2,$3,$4,1,NULL,false,NULL)`,
+        [list.guild_id, list.id, op.slot, itemId],
+      );
+      await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+      applied.push(op.op_id);
+      list = (await getList(db, list.id))!;
+      continue;
+    }
+
     const items = await getItems(db, list.id);
-    const existing = items.find((i) => i.slot === op.slot && i.item_id === op.item_id);
-    const lastTouch = await lastItemTouchSeq(db, list.id, op.slot, op.item_id);
+    const existing = items.find((i) => i.slot === op.slot && i.item_id === op.item_id!);
+    const lastTouch = await lastItemTouchSeq(db, list.id, op.slot, op.item_id!);
 
     // Stale base_version when the same item was touched after client's base
     if (lastTouch > op.base_version) {

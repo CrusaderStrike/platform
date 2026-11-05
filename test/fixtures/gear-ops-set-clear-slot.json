@@ -1,0 +1,43 @@
+{
+  "description": "Example POST /api/v1/gear-lists/{id}/ops bodies for set_slot / clear_slot (platform#45).",
+  "set_slot": {
+    "ops": [
+      {
+        "op_id": "019a0000-0000-7000-8000-000000000101",
+        "type": "set_slot",
+        "slot": "head",
+        "item_id": 16846,
+        "base_version": 1
+      }
+    ]
+  },
+  "clear_slot": {
+    "ops": [
+      {
+        "op_id": "019a0000-0000-7000-8000-000000000102",
+        "type": "clear_slot",
+        "slot": "head",
+        "base_version": 2
+      }
+    ]
+  },
+  "mixed_with_legacy": {
+    "ops": [
+      {
+        "op_id": "019a0000-0000-7000-8000-000000000103",
+        "type": "set_slot",
+        "slot": "main_hand",
+        "item_id": 19019,
+        "base_version": 3
+      },
+      {
+        "op_id": "019a0000-0000-7000-8000-000000000104",
+        "type": "add_item",
+        "slot": "trinket1",
+        "item_id": 18820,
+        "priority": 1,
+        "base_version": 3
+      }
+    ]
+  }
+}
