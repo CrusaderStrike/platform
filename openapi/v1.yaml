@@ -451,6 +451,7 @@ paths:
       tags: [gear]
       operationId: listGearEvents
       summary: Gear list event history
+      description: Visibility (all members vs officers only) is an open question for Drew (#13 Q2); 403 if restricted.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - name: after_version
@@ -468,7 +469,47 @@ paths:
                   - type: object
                     properties:
                       items: { type: array, items: { $ref: '#/components/schemas/GearEvent' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /sync/savedvariables:
+    post:
+      tags: [sync]
+      operationId: manualSavedVariablesSync
+      summary: Manual sync without a helper app (upload SavedVariables, download updated file)
+      description: |
+        This is the default path from the #13 joint recommendation, and it needs no desktop app. A signed-in user uploads
+        `WTF/Account/<ACCOUNT>/SavedVariables/CrusaderStrike.lua` from the website. The server parses the pending
+        runs and gear ops from it and applies them with the same rules as `/sync`
+        (idempotent per addon_run_id and op_id, with item-level merge and conflicts). It then returns an updated file
+        for the user to save back and `/reload` or relog in game. The guild comes from the session.
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, contentMediaType: text/plain, description: 'SavedVariables Lua file, max 2 MB.' }
+      responses:
+        '200':
+          description: Updated SavedVariables file; summary in X-CS-Sync-Summary (JSON-encoded SyncResponse counts).
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            X-CS-Sync-Summary: { schema: { type: string } }
+          content:
+            text/plain:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413':
+          description: File too large.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /sync:
     post:
       tags: [sync]
@@ -476,6 +517,8 @@ paths:
       security: [{ uploaderToken: [] }, { session: [] }]
       summary: Companion uploader sync (push runs and gear ops, pull changes)
       description: |
+        Optional helper-app path. Whether members may install a desktop app is an open question for Drew (#13 Q1).
+        The default is `/sync/savedvariables`.
         Used for pull at game launch, push at game exit and a manual "Sync now".
         This one call combines the run upload semantics (idempotent per addon_run_id) and gear ops,
         then returns server events after each list's `since_version` for the companion to write into SavedVariables.
