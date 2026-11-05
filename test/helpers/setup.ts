@@ -95,6 +95,11 @@ export async function startTestApp(opts?: {
   regions?: string;
   /** Optional BUILD_SHA for /healthz tests (platform#49). */
   buildSha?: string;
+  /**
+   * Force COOKIE_SECURE. Default false (plain-http harness).
+   * Pass true to exercise the production Secure cookie path (platform#60).
+   */
+  cookieSecure?: boolean;
 }): Promise<TestCtx> {
   const url = await ensurePg();
   const pool = createPool(url);
@@ -122,7 +127,7 @@ export async function startTestApp(opts?: {
     PUBLIC_API_ORIGIN: 'http://127.0.0.1',
     BLIZZARD_REDIRECT_URI: 'http://127.0.0.1/api/v1/auth/blizzard/callback',
     CORS_ORIGINS: 'https://crusaderstrike.com,https://www.crusaderstrike.com',
-    COOKIE_SECURE: 'false',
+    COOKIE_SECURE: opts?.cookieSecure ? 'true' : 'false',
     ...(opts?.buildSha !== undefined ? { BUILD_SHA: opts.buildSha } : {}),
   });
 
