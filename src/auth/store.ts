@@ -49,7 +49,9 @@ export type CharacterRow = {
 export type SelectionRow = {
   user_id: string;
   displayed_character_ids: string[];
-  updated_at: Date;
+  /** Compat main — persisted in character_selections.main_id while still displayed. */
+  main_id: string | null;
+  updated_at: Date | null;
 };
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -226,28 +228,8 @@ export async function replaceCharacters(
        WHERE user_id = $1 AND stale = true AND displayed = true`,
       [userId],
     );
-    // Keep character_selections mirror in sync after auto-hiding stale chars.
-    const liveDisplayed = await client.query<{ id: string }>(
-      `SELECT id FROM characters
-       WHERE user_id = $1 AND displayed = true AND stale = false
-       ORDER BY character_name, surname NULLS LAST`,
-      [userId],
-    );
-    const mirrorIds = liveDisplayed.rows.map((r) => r.id);
-    if (mirrorIds.length === 0) {
-      await client.query(`DELETE FROM character_selections WHERE user_id = $1`, [userId]);
-    } else {
-      await client.query(
-        `INSERT INTO character_selections (user_id, main_id, alt_ids, displayed_character_ids, updated_at)
-         VALUES ($1, $2, $3::text[], $4::text[], now())
-         ON CONFLICT (user_id) DO UPDATE SET
-           main_id = EXCLUDED.main_id,
-           alt_ids = EXCLUDED.alt_ids,
-           displayed_character_ids = EXCLUDED.displayed_character_ids,
-           updated_at = now()`,
-        [userId, mirrorIds[0], mirrorIds.slice(1), mirrorIds],
-      );
-    }
+    // Preserve persisted main / client order via the shared mirror helper.
+    await resyncSelectionMirror(client, userId);
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -271,14 +253,38 @@ export async function listCharacters(db: Db, userId: string): Promise<CharacterR
   return res.rows;
 }
 
-/** Mirror display set into character_selections (kept one release for rollback). */
-async function syncSelectionMirror(db: Db, userId: string, ids: string[]): Promise<void> {
+type SelectionMirrorRow = {
+  main_id: string | null;
+  alt_ids: string[];
+  displayed_character_ids: string[];
+  updated_at: Date;
+};
+
+async function readSelectionMirror(db: Db, userId: string): Promise<SelectionMirrorRow | null> {
+  const res = await db.query<SelectionMirrorRow>(
+    `SELECT main_id, alt_ids, displayed_character_ids, updated_at
+     FROM character_selections WHERE user_id = $1`,
+    [userId],
+  );
+  return res.rows[0] ?? null;
+}
+
+/**
+ * Mirror display set into character_selections (kept one release for rollback).
+ * `ids` keeps client order; `mainId` is the chosen main when still in `ids`.
+ */
+async function syncSelectionMirror(
+  db: Db,
+  userId: string,
+  ids: string[],
+  mainId: string | null,
+): Promise<void> {
   if (ids.length === 0) {
     await db.query(`DELETE FROM character_selections WHERE user_id = $1`, [userId]);
     return;
   }
-  const main = ids[0]!;
-  const alts = ids.slice(1);
+  const main = mainId && ids.includes(mainId) ? mainId : ids[0]!;
+  const alts = ids.filter((id) => id !== main);
   await db.query(
     `INSERT INTO character_selections (user_id, main_id, alt_ids, displayed_character_ids, updated_at)
      VALUES ($1, $2, $3::text[], $4::text[], now())
@@ -291,36 +297,68 @@ async function syncSelectionMirror(db: Db, userId: string, ids: string[]): Promi
   );
 }
 
-/** Always returns a selection object (empty array when nothing is displayed). */
+/** Rebuild mirror from live displayed flags, keeping persisted main + prior order when possible. */
+async function resyncSelectionMirror(db: Db, userId: string): Promise<SelectionRow> {
+  const selection = await getSelection(db, userId);
+  await syncSelectionMirror(db, userId, selection.displayed_character_ids, selection.main_id);
+  return getSelection(db, userId);
+}
+
+/**
+ * Always returns a selection object (empty array when nothing is displayed).
+ * Order and main_id come from character_selections when still valid; never sorted by name.
+ */
 export async function getSelection(db: Db, userId: string): Promise<SelectionRow> {
-  const res = await db.query<{ id: string; updated_at: Date }>(
-    `SELECT id, updated_at FROM characters
-     WHERE user_id = $1 AND displayed = true AND stale = false
-     ORDER BY character_name, surname NULLS LAST`,
+  const liveRes = await db.query<{ id: string }>(
+    `SELECT id FROM characters
+     WHERE user_id = $1 AND displayed = true AND stale = false`,
     [userId],
   );
-  if (!res.rows.length) {
+  const liveSet = new Set(liveRes.rows.map((r) => r.id));
+  if (liveSet.size === 0) {
     return {
       user_id: userId,
       displayed_character_ids: [],
-      updated_at: new Date(0),
+      main_id: null,
+      updated_at: null,
     };
   }
-  const updatedAt = res.rows.reduce(
-    (max, row) => (row.updated_at > max ? row.updated_at : max),
-    res.rows[0]!.updated_at,
-  );
+
+  const mirror = await readSelectionMirror(db, userId);
+  const order: string[] = [];
+  if (mirror) {
+    for (const id of mirror.displayed_character_ids ?? []) {
+      if (liveSet.has(id) && !order.includes(id)) order.push(id);
+    }
+  }
+  for (const id of liveSet) {
+    if (!order.includes(id)) order.push(id);
+  }
+
+  let mainId: string | null = null;
+  if (mirror?.main_id && liveSet.has(mirror.main_id)) {
+    mainId = mirror.main_id;
+  } else {
+    mainId = order[0] ?? null;
+  }
+
   return {
     user_id: userId,
-    displayed_character_ids: res.rows.map((r) => r.id),
-    updated_at: updatedAt,
+    displayed_character_ids: order,
+    main_id: mainId,
+    updated_at: mirror?.updated_at ?? null,
   };
 }
 
 /** Replace-all display set. Ids must already be validated as owned Forever live chars. */
 export async function setSelection(
   db: Db,
-  args: { userId: string; displayedCharacterIds: string[] },
+  args: {
+    userId: string;
+    displayedCharacterIds: string[];
+    /** Explicit compat main; defaults to first id in the sent list. */
+    mainId?: string | null;
+  },
 ): Promise<SelectionRow> {
   const ids = args.displayedCharacterIds;
   // Do not bump characters.updated_at — that timestamp is for Blizzard refresh.
@@ -329,9 +367,14 @@ export async function setSelection(
      WHERE user_id = $1`,
     [args.userId, ids],
   );
-  const selection = await getSelection(db, args.userId);
-  await syncSelectionMirror(db, args.userId, selection.displayed_character_ids);
-  return selection;
+  let main: string | null;
+  if (args.mainId !== undefined) {
+    main = args.mainId && ids.includes(args.mainId) ? args.mainId : ids[0] ?? null;
+  } else {
+    main = ids[0] ?? null;
+  }
+  await syncSelectionMirror(db, args.userId, ids, main);
+  return getSelection(db, args.userId);
 }
 
 /** Toggle one character's displayed flag (primary UI path). Does not bump updated_at. */
@@ -339,6 +382,7 @@ export async function setCharacterDisplayed(
   db: Db,
   args: { userId: string; characterId: string; displayed: boolean },
 ): Promise<CharacterRow | null> {
+  const mirror = await readSelectionMirror(db, args.userId);
   const res = await db.query<CharacterRow>(
     `UPDATE characters SET displayed = $3
      WHERE id = $1 AND user_id = $2
@@ -346,10 +390,14 @@ export async function setCharacterDisplayed(
     [args.characterId, args.userId, args.displayed],
   );
   const row = res.rows[0] ?? null;
-  if (row) {
-    const selection = await getSelection(db, args.userId);
-    await syncSelectionMirror(db, args.userId, selection.displayed_character_ids);
-  }
+  if (!row) return null;
+
+  // Preserve prior client order; append on show, drop on hide. Keep main if still displayed.
+  const prior = (mirror?.displayed_character_ids ?? []).filter((id) => id !== args.characterId);
+  const ids = args.displayed ? [...prior, args.characterId] : prior;
+  const main =
+    mirror?.main_id && ids.includes(mirror.main_id) ? mirror.main_id : ids[0] ?? null;
+  await syncSelectionMirror(db, args.userId, ids, main);
   return row;
 }
 
@@ -476,11 +524,12 @@ export function characterToApi(c: CharacterRow) {
 
 export function selectionToApi(s: SelectionRow) {
   const ids = s.displayed_character_ids ?? [];
+  const mainId = s.main_id && ids.includes(s.main_id) ? s.main_id : ids[0] ?? null;
   return {
     displayed_character_ids: ids,
-    // Compat for live web until web#43 ships (derived from display set).
-    main_id: ids[0] ?? null,
-    alt_ids: ids.slice(1),
-    updated_at: s.updated_at.toISOString(),
+    // Compat for live web until web#43 ships.
+    main_id: mainId,
+    alt_ids: ids.filter((id) => id !== mainId),
+    updated_at: s.updated_at ? s.updated_at.toISOString() : null,
   };
 }

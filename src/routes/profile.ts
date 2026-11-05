@@ -26,12 +26,11 @@ function characterListBody(chars: store.CharacterRow[], selection: store.Selecti
 }
 
 function profileBody(user: store.UserRow, selection: store.SelectionRow) {
-  const ids = selection.displayed_character_ids;
   return {
     battletag: user.battletag,
     preferred_region: user.preferred_region,
-    // Compat: first displayed character, or null when none (live web until web#43).
-    main_character_id: ids[0] ?? null,
+    // Compat: persisted main while displayed, else first displayed, else null.
+    main_character_id: selection.main_id,
     created_at: user.created_at.toISOString(),
     updated_at: user.updated_at.toISOString(),
   };
@@ -39,8 +38,15 @@ function profileBody(user: store.UserRow, selection: store.SelectionRow) {
 
 const PROFILE_UPDATE_KEYS = new Set(['preferred_region']);
 
-/** Parse new `{displayed_character_ids}` or legacy `{main_id, alt_ids}` into a unique id list. */
-function parseDisplayedIds(body: Record<string, unknown>): string[] {
+type ParsedSelection = {
+  ids: string[];
+  /** Explicit main for legacy body; first id for the new shape. */
+  mainId: string | null;
+  shape: 'displayed' | 'legacy';
+};
+
+/** Parse new `{displayed_character_ids}` or legacy `{main_id, alt_ids}` (order preserved). */
+function parseDisplayedIds(body: Record<string, unknown>): ParsedSelection {
   if (Array.isArray(body.displayed_character_ids)) {
     const rawIds = body.displayed_character_ids;
     const seen = new Set<string>();
@@ -55,13 +61,14 @@ function parseDisplayedIds(body: Record<string, unknown>): string[] {
       seen.add(id);
       ids.push(id);
     }
-    return ids;
+    return { ids, mainId: ids[0] ?? null, shape: 'displayed' };
   }
 
   // Legacy body used by live crusaderstrike.com until web#43.
   if ('main_id' in body || 'alt_ids' in body) {
     const seen = new Set<string>();
     const ids: string[] = [];
+    let mainId: string | null = null;
     const main = body.main_id;
     if (main !== undefined && main !== null) {
       if (typeof main !== 'string' || !main) {
@@ -69,6 +76,7 @@ function parseDisplayedIds(body: Record<string, unknown>): string[] {
           main_id: 'Must be a character id or null.',
         });
       }
+      mainId = main;
       seen.add(main);
       ids.push(main);
     }
@@ -90,7 +98,7 @@ function parseDisplayedIds(body: Record<string, unknown>): string[] {
         ids.push(id);
       }
     }
-    return ids;
+    return { ids, mainId, shape: 'legacy' };
   }
 
   throw new AppError(400, 'validation_error', 'Invalid selection.', {
@@ -247,26 +255,40 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
         body: 'Expected a JSON object.',
       });
     }
-    const ids = parseDisplayedIds(body);
+    const parsed = parseDisplayedIds(body);
     const chars = await store.listCharacters(pool, s.userId);
     const live = new Map(
       chars
         .filter((c) => !c.stale && c.game === 'wow_forever')
         .map((c) => [c.id, c] as const),
     );
-    for (const id of ids) {
-      if (!live.has(id)) {
-        const field = Array.isArray(body.displayed_character_ids)
-          ? 'displayed_character_ids'
-          : 'main_id';
+    if (parsed.shape === 'legacy') {
+      if (parsed.mainId && !live.has(parsed.mainId)) {
         throw new AppError(400, 'validation_error', 'Invalid selection.', {
-          [field]: 'unknown_character',
+          main_id: 'unknown_character',
         });
+      }
+      for (const id of parsed.ids) {
+        if (id === parsed.mainId) continue;
+        if (!live.has(id)) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            alt_ids: 'unknown_character',
+          });
+        }
+      }
+    } else {
+      for (const id of parsed.ids) {
+        if (!live.has(id)) {
+          throw new AppError(400, 'validation_error', 'Invalid selection.', {
+            displayed_character_ids: 'unknown_character',
+          });
+        }
       }
     }
     const selection = await store.setSelection(pool, {
       userId: s.userId,
-      displayedCharacterIds: ids,
+      displayedCharacterIds: parsed.ids,
+      mainId: parsed.mainId,
     });
     return { selection: store.selectionToApi(selection) };
   });

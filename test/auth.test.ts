@@ -60,7 +60,12 @@ describe('Blizzard OAuth + characters (#11)', () => {
     };
     expect(list.game).toBe('wow_forever');
     expect(list.selection).toEqual(
-      expect.objectContaining({ displayed_character_ids: [], main_id: null, alt_ids: [] }),
+      expect.objectContaining({
+        displayed_character_ids: [],
+        main_id: null,
+        alt_ids: [],
+        updated_at: null,
+      }),
     );
     expect(list.characters.every((c) => c.game === 'wow_forever')).toBe(true);
     expect(list.characters.map((c) => c.character_name)).toEqual(
@@ -438,7 +443,12 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(clear.statusCode).toBe(200);
     expect(clear.json()).toMatchObject({
-      selection: { displayed_character_ids: [], main_id: null, alt_ids: [] },
+      selection: {
+        displayed_character_ids: [],
+        main_id: null,
+        alt_ids: [],
+        updated_at: null,
+      },
     });
 
     const profile = await ctx.app.inject({
@@ -447,6 +457,115 @@ describe('Blizzard OAuth + characters (#11)', () => {
       headers: { cookie },
     });
     expect(profile.json()).toMatchObject({ main_character_id: null });
+
+    // Bad alt id keys the error under alt_ids (not main_id).
+    const badAlt = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/characters/selection',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { main_id: main.id, alt_ids: ['ch_us_not_owned'] },
+    });
+    expect(badAlt.statusCode).toBe(400);
+    expect(badAlt.json()).toMatchObject({ errors: { alt_ids: 'unknown_character' } });
+  });
+
+  it('legacy main_id round-trips when main sorts after an alt (Zed/Abe order)', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    const chars = (
+      await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } })
+    ).json() as { characters: Array<{ id: string; character_name: string }> };
+    // Thornquill (T) sorts after Lightbringer (L) — chosen main must win over name order.
+    const zed = chars.characters.find((c) => c.character_name === 'Thornquill')!;
+    const abe = chars.characters.find((c) => c.character_name === 'Lightbringer')!;
+    expect(zed.character_name > abe.character_name).toBe(true);
+
+    const save = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/characters/selection',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { main_id: zed.id, alt_ids: [abe.id] },
+    });
+    expect(save.statusCode).toBe(200);
+    expect(save.json()).toMatchObject({
+      selection: {
+        displayed_character_ids: [zed.id, abe.id],
+        main_id: zed.id,
+        alt_ids: [abe.id],
+      },
+    });
+
+    // Mirror stores the true sent main for rollback.
+    const mirror = await ctx.pool.query<{ main_id: string; displayed_character_ids: string[] }>(
+      `SELECT main_id, displayed_character_ids FROM character_selections LIMIT 1`,
+    );
+    expect(mirror.rows[0]).toMatchObject({
+      main_id: zed.id,
+      displayed_character_ids: [zed.id, abe.id],
+    });
+
+    const listed = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/characters',
+      headers: { cookie },
+    });
+    expect(listed.json()).toMatchObject({
+      selection: {
+        displayed_character_ids: [zed.id, abe.id],
+        main_id: zed.id,
+        alt_ids: [abe.id],
+      },
+    });
+
+    const profile = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/profile',
+      headers: { cookie },
+    });
+    expect(profile.json()).toMatchObject({ main_character_id: zed.id });
+
+    // Toggling another character off must keep Zed as main.
+    const hideAbe = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${abe.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: false },
+    });
+    expect(hideAbe.statusCode).toBe(200);
+    expect(hideAbe.json()).toMatchObject({
+      selection: { displayed_character_ids: [zed.id], main_id: zed.id, alt_ids: [] },
+    });
+
+    // Re-show Abe; main stays Zed (not alphabetical first).
+    const showAbe = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${abe.id}`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed: true },
+    });
+    expect(showAbe.json()).toMatchObject({
+      selection: {
+        displayed_character_ids: [zed.id, abe.id],
+        main_id: zed.id,
+        alt_ids: [abe.id],
+      },
+    });
+
+    // New-shape PUT also keeps client-sent order (main last in array still becomes main via first? —
+    // for displayed_character_ids the first id is main; reverse-order list with Zed first).
+    const reverseDisplayed = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/v1/me/characters/selection',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { displayed_character_ids: [zed.id, abe.id] },
+    });
+    expect(reverseDisplayed.json()).toMatchObject({
+      selection: {
+        displayed_character_ids: [zed.id, abe.id],
+        main_id: zed.id,
+        alt_ids: [abe.id],
+      },
+    });
   });
 
   it('allows return_to=/profile/ on Battle.net login', async () => {

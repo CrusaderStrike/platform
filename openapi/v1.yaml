@@ -2002,7 +2002,11 @@ components:
           type: array
           items: { type: string }
           description: Compat — remaining displayed ids. Remove after web#43.
-        updated_at: { type: string, format: date-time }
+        updated_at:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: 'null' }
+          description: From character_selections.updated_at; null when the display set is empty.
     CharacterList:
       type: object
       required: [game, characters, selection]
