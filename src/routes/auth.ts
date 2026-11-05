@@ -2,7 +2,14 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from '../db/pool.js';
 import type { Config } from '../config.js';
 import type { BlizzardClient } from '../blizzard/client.js';
-import { encryptSecret, isSafeReturnTo, safeWebRedirect, randomToken, sha256Base64Url } from '../lib/crypto.js';
+import {
+  DEFAULT_RETURN_TO,
+  encryptSecret,
+  resolveSafeReturnTo,
+  safeWebRedirect,
+  randomToken,
+  sha256Base64Url,
+} from '../lib/crypto.js';
 import * as store from '../auth/store.js';
 import {
   clearSessionCookie,
@@ -20,31 +27,31 @@ export type AuthDeps = {
   redirectUri: string;
 };
 
-const DEFAULT_RETURN_TO = '/profile/';
-
 function truncateReturnTo(value: string, max = 64): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
 }
 
-/** Resolve a client-supplied return_to; invalid/missing → /profile/. Logs at most a truncated value. */
+/**
+ * Client-supplied or stored return_to via the shared validator + origin-check (platform#68).
+ * Invalid/missing → /profile/. Logs at most a truncated rejected value.
+ */
 function resolveReturnTo(
   siteOrigin: string,
-  raw: string | undefined,
+  raw: string | undefined | null,
   log?: { warn: (obj: Record<string, unknown>, msg: string) => void },
 ): string {
-  if (raw === undefined || raw === '') return DEFAULT_RETURN_TO;
-  if (isSafeReturnTo(raw)) {
-    try {
-      // Also reject values that would leave the site origin after URL resolution.
-      safeWebRedirect(siteOrigin, raw);
-      return raw;
-    } catch {
-      // fall through
-    }
+  const resolved = resolveSafeReturnTo(siteOrigin, raw);
+  if (
+    raw !== undefined &&
+    raw !== null &&
+    raw !== '' &&
+    resolved === DEFAULT_RETURN_TO &&
+    raw !== DEFAULT_RETURN_TO
+  ) {
+    log?.warn({ return_to_truncated: truncateReturnTo(raw) }, 'rejected return_to; using /profile/');
   }
-  log?.warn({ return_to_truncated: truncateReturnTo(raw) }, 'rejected return_to; using /profile/');
-  return DEFAULT_RETURN_TO;
+  return resolved;
 }
 
 function webRedirect(config: Config, returnTo: string, params: Record<string, string>): string {
@@ -84,8 +91,8 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     const state = q.state ?? '';
     const saved = state ? await store.takeOauthState(pool, state) : null;
     // Never read return_to from the callback query — only the server-stored path (single-use via take).
-    const returnTo =
-      saved?.returnTo && isSafeReturnTo(saved.returnTo) ? saved.returnTo : DEFAULT_RETURN_TO;
+    // Re-validate with the same shared helper used at start-auth (platform#68).
+    const returnTo = resolveReturnTo(config.PUBLIC_WEB_ORIGIN, saved?.returnTo);
 
     if (q.error === 'access_denied') {
       return reply.redirect(webRedirect(config, returnTo, { auth: 'cancelled' }));
@@ -131,7 +138,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
       const status = (err as { status?: number }).status;
       req.log.error({ err }, 'oauth callback failed');
       const reason = status && status >= 500 ? 'upstream_unavailable' : 'oauth_error';
-      return reply.redirect(webRedirect(config, returnTo, { auth: 'error', reason }));
+      // Failed exchange (including cross-login state/code tamper) must not land on the
+      // stored return_to — always soft-fall back to /profile/ (platform#68).
+      return reply.redirect(webRedirect(config, DEFAULT_RETURN_TO, { auth: 'error', reason }));
     }
   });
 

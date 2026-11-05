@@ -61,6 +61,30 @@ export function isSafeReturnTo(value: string | undefined | null): value is strin
   return true;
 }
 
+/** Default soft-fallback when return_to is missing or unsafe (platform#64/#68). */
+export const DEFAULT_RETURN_TO = '/profile/';
+
+/**
+ * Shared validator + origin-check for start-auth and the callback (platform#68).
+ * Returns the raw path when it is a same-origin relative path after one decode and
+ * URL resolution; otherwise returns `fallback` (default `/profile/`).
+ * Note: paths like `/foo:bar` fail the scheme-looking check in `isSafeReturnTo`.
+ */
+export function resolveSafeReturnTo(
+  siteOrigin: string,
+  raw: string | undefined | null,
+  fallback: string = DEFAULT_RETURN_TO,
+): string {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (!isSafeReturnTo(raw)) return fallback;
+  try {
+    safeWebRedirect(siteOrigin, raw);
+    return raw;
+  } catch {
+    return fallback;
+  }
+}
+
 /** Resolve return_to against the site origin; throw if the result leaves that origin. */
 export function safeWebRedirect(
   siteOrigin: string,
