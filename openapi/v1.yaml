@@ -688,75 +688,226 @@ paths:
                         type: array
                         items: { $ref: '#/components/schemas/RankingEntry' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-  /gear-lists:
+  /characters/{character_id}/gear-lists:
     get:
       tags: [gear]
-      operationId: listGearLists
-      summary: Gear lists in the active guild
+      operationId: listCharacterGearLists
+      summary: Gear wishlists for a character (max 5)
+      description: |
+        Lists are **per character** (platform#17). Returns at most 5 active lists.
+        Owner sees private + guild-shared lists they own; other guild members only see
+        lists with `visibility=guild` for characters they can access via guild context.
+        For slice 1, the caller must own the character (selected main/alt).
       parameters:
-        - { name: member_id, in: query, schema: { type: string, format: uuid } }
-        - { $ref: '#/components/parameters/Cursor' }
-        - { $ref: '#/components/parameters/Limit' }
+        - name: character_id
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         '200':
-          description: Page of gear lists.
+          description: Active gear lists for the character.
           content:
             application/json:
               schema:
-                allOf:
-                  - { $ref: '#/components/schemas/PageMeta' }
-                  - type: object
-                    properties:
-                      items: { type: array, items: { $ref: '#/components/schemas/GearList' } }
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 5
+                    items: { $ref: '#/components/schemas/GearList' }
+              example:
+                items:
+                  - id: 019a0000-0000-7000-8000-000000000001
+                    character_id: "us-emberfall-aldric"
+                    owner_user_id: 019a0000-0000-7000-8000-0000000000aa
+                    name: Emberfall BiS
+                    visibility: private
+                    version: 3
+                    updated_at: "2026-11-05T03:00:00Z"
+                    updated_source: web
+                    items:
+                      - slot: main_hand
+                        item_id: 19019
+                        priority: 1
+                        note: Thunderfury wish
+                        obtained: false
+                        obtained_at: null
+                        icon_url: null
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [gear]
-      operationId: createGearList
-      summary: Create gear list (emits GearListCreated)
-      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      operationId: createCharacterGearList
+      summary: Create a gear wishlist (emits GearListCreated)
+      description: |
+        Max **5** active lists per character. A 6th create returns **409** `list_limit_reached`.
+        Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
+        Gear writes are rate-limited (~60 writes/min per user, rolling window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+      parameters:
+        - name: character_id
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: '#/components/parameters/CsrfToken' }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [member_id, name]
+              required: [name]
+              additionalProperties: false
               properties:
-                member_id: { type: string, format: uuid }
-                name: { type: string, maxLength: 64 }
+                name: { type: string, minLength: 1, maxLength: 64 }
+                visibility: { type: string, enum: [private, guild], default: private }
+            example: { name: Emberfall BiS, visibility: private }
       responses:
         '201':
           description: Created.
+          headers:
+            ETag: { schema: { type: string }, description: '"v1"' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearList' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Already at 5 lists (`list_limit_reached`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: { code: list_limit_reached, message: Maximum of 5 gear lists per character., request_id: req_1 }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /gear-lists/{list_id}:
     get:
       tags: [gear]
       operationId: getGearList
       summary: Gear list projection
-      parameters: [{ $ref: '#/components/parameters/ListId' }]
+      parameters:
+        - { $ref: '#/components/parameters/ListId' }
       responses:
         '200':
           description: Gear list.
+          headers:
+            ETag: { schema: { type: string }, description: '"v<version>" concurrency token' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [gear]
+      operationId: patchGearList
+      summary: Rename and/or change visibility (If-Match required)
+      description: |
+        Strict optimistic concurrency for **list metadata**. Send `If-Match: "v<version>"`.
+        Mismatch → **409** `version_mismatch` with `current: { version, list }` so the client
+        can re-apply without another GET. Only the **owner** may write; officers get **403** `forbidden`.
+        Emits `GearListRenamed` (name and/or visibility in payload).
+        Missing If-Match → **428** `precondition_required`. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+      parameters:
+        - { $ref: '#/components/parameters/ListId' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string, examples: ['"v3"'] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 64 }
+                visibility: { type: string, enum: [private, guild] }
+      responses:
+        "428":
+          description: Missing If-Match (precondition_required)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        '200':
+          description: Updated.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GearList' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: version_mismatch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GearVersionMismatch' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    delete:
+      tags: [gear]
+      operationId: deleteGearList
+      summary: Soft-delete list (If-Match required; emits GearListDeleted)
+      parameters:
+        - { $ref: '#/components/parameters/ListId' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        "428":
+          description: Missing If-Match (precondition_required)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        '204':
+          description: Deleted.
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: version_mismatch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GearVersionMismatch' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /gear-lists/{list_id}/ops:
     post:
       tags: [gear]
       operationId: applyGearOps
-      summary: Append gear ops (idempotent per op_id; item-level merge)
+      summary: Append gear item ops (idempotent; item-level merge; always 200)
       description: |
-        Ops are applied in order. Ops with an `op_id` that was already seen are acknowledged as `duplicate`.
-        Ops on different items always merge. If the same item was changed after `base_version`,
-        last-writer-wins by server time, deletes beat reprioritizes, and a stale addon op loses to a web op.
-        Losing ops are recorded as `GearOpRejected` and returned in `conflicts`.
-        Returns 200 even when some ops conflict.
+        **Item edits never return 409.** Ops on different `(slot, item_id)` always merge.
+        Same-item conflicts: last-writer-wins by server `recorded_at`; delete wins over
+        reprioritize/obtain; a stale `base_version` loses. Losers are recorded as
+        `GearOpRejected` and returned in `conflicts[]`.
+
+        **`base_version` (web):** the list `version` the client last observed (from GET,
+        create, or the previous ops/sync response). Set every web op's `base_version` to
+        that value. If the server has applied a later event touching the same item, the op
+        loses with `stale_base_version` (or `item_removed`).
+
+        **Undo obtained:** send `mark_obtained` with `obtained: false` (no separate op type).
+
+        Unknown keys on individual ops are soft-ignored (listed in `ignored`). Envelope keys
+        beyond `ops` are rejected (client `source` is ignored; server records `web`). Max 200 ops.
+        Non-Forever `item_id` → the op is rejected; when a Forever catalog is enforced, clients
+        should prefer **422** `item_not_forever` on single-item helpers — reserved code.
+        Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -767,7 +918,9 @@ paths:
             schema:
               type: object
               required: [ops]
+              additionalProperties: false
               properties:
+                # Client `source` is ignored; web session routes always record source=web.
                 ops:
                   type: array
                   minItems: 1
@@ -775,20 +928,31 @@ paths:
                   items: { $ref: '#/components/schemas/GearOp' }
       responses:
         '200':
-          description: Result.
+          description: Result (including partial conflicts).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearOpsResult' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: item_not_forever (when Forever catalog is enforced)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /gear-lists/{list_id}/events:
     get:
       tags: [gear]
       operationId: listGearEvents
       summary: Gear list event history
-      description: Visibility (all members vs officers only) is an open question for Drew (#13 Q2); 403 if restricted.
+      description: |
+        Path is **`/events`** (not `/history`). Visibility follows the list: owner always;
+        guild members when `visibility=guild`; others get **403** `forbidden`.
+        `actor` is `{ user_id, display_name }` (BattleTag), not a bare UUID.
+        Each `event_type` has a documented payload schema under `GearEventPayload*`.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - name: after_version
@@ -797,28 +961,55 @@ paths:
         - { $ref: '#/components/parameters/Limit' }
       responses:
         '200':
-          description: Events ascending by version.
+          description: Events ascending by version/seq.
           content:
             application/json:
               schema:
-                allOf:
-                  - { $ref: '#/components/schemas/PageMeta' }
-                  - type: object
-                    properties:
-                      items: { type: array, items: { $ref: '#/components/schemas/GearEvent' } }
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/GearEvent' } }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /items/search:
+    get:
+      tags: [gear]
+      operationId: searchItems
+      summary: Forever item search (planned; not implemented in #17)
+      description: |
+        **Out of scope for platform#17.** Planned follow-up once a WoW Forever item catalog
+        exists: `GET /api/v1/items/search?q=&slot=` returning Forever-only items for the
+        add-item picker. Until then clients supply Forever `item_id` values directly.
+        This path is reserved and currently returns **501** `not_implemented`.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 64 }
+        - name: slot
+          in: query
+          schema: { $ref: '#/components/schemas/GearSlot' }
+      responses:
+        '501':
+          description: Not implemented until Forever item catalog lands.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: { code: not_implemented, message: Forever item search is not available yet., request_id: req_1 }
+
   /sync/savedvariables:
     post:
       tags: [sync]
       operationId: manualSavedVariablesSync
       summary: Manual sync without a helper app (upload SavedVariables, download updated file)
       description: |
-        This is the default path from the #13 joint recommendation, and it needs no desktop app. A signed-in user uploads
-        `WTF/Account/<ACCOUNT>/SavedVariables/CrusaderStrike.lua` from the website. The server parses the pending
-        runs and gear ops from it and applies them with the same rules as `/sync`
-        (idempotent per addon_run_id and op_id, with item-level merge and conflicts). It then returns an updated file
-        for the user to save back and `/reload` or relog in game. The guild comes from the session.
+        Export-string / file path for platform#21. Same gear op schema and conflict rules as
+        `POST /sync` with `source: export`. Not fully implemented in #17 (gear JSON sync is).
+        Max body 2 MB.
       security: [{ session: [] }]
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
@@ -831,40 +1022,54 @@ paths:
               properties:
                 file: { type: string, contentMediaType: text/plain, description: 'SavedVariables Lua file, max 2 MB.' }
       responses:
-        '200':
-          description: Updated SavedVariables file; summary in X-CS-Sync-Summary (JSON-encoded SyncResponse counts).
-          headers:
-            Content-Disposition: { schema: { type: string } }
-            X-CS-Sync-Summary: { schema: { type: string } }
+        '501':
+          description: Reserved; use POST /sync with source=export for JSON ops in #17.
           content:
-            text/plain:
-              schema: { type: string }
-        '400': { $ref: '#/components/responses/ValidationError' }
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '413': { $ref: '#/components/responses/PayloadTooLarge' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /sync:
     post:
       tags: [sync]
       operationId: addonSync
-      security: [{ uploaderToken: [] }, { session: [] }]
-      summary: Companion uploader sync (push runs and gear ops, pull changes)
+      summary: Push gear ops and pull events (companion or export; same schema)
       description: |
-        Optional helper-app path. Whether members may install a desktop app is an open question for Drew (#13 Q1).
-        The default is `/sync/savedvariables`.
-        Each run is processed independently. A run that fails validation or conflicts is reported in its own
-        `SyncResponse.runs[]` entry and does not fail the batch. Max body 1 MB (413).
-        Used for pull at game launch, push at game exit and a manual "Sync now".
-        This one call combines the run upload semantics (idempotent per addon_run_id) and gear ops,
-        then returns server events after each list's `since_version` for the companion to write into SavedVariables.
+        Sync path is **agnostic** (platform#21 still open): companion app and export/SavedVariables
+        feeders both POST this shape. Set `source` to `companion`, `export`, or `addon` only.
+        `web` and `system` are never accepted from clients (server-derived on session routes).
+        Provide `characterId` **or** `realm`+`name` (realm normalized like `/uploads`).
+        Envelope is strict; unknown keys on individual ops are soft-ignored.
+        Each list entry applies `ops[]` under SAVEPOINTs with stable reject codes, then returns
+        server events after `since_version` plus the new `version`.
+
+        Conflict rules: auto-merge by slot/item; last-writer-wins by `recorded_at`; stale
+        `base_version` loses; delete wins; losers → `GearOpRejected` in `conflicts[]`.
+        Max body 1 MiB. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+        Per-list failures return a stable `error` object (no raw database messages).
+        At most **500** ops total across all lists in one request.
+      security: [{ uploaderToken: [] }, { session: [] }]
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/SyncRequest' }
+            example:
+              schemaVersion: 1
+              source: companion
+              characterId: us-emberfall-aldric
+              lists:
+                - list_id: 019a0000-0000-7000-8000-000000000001
+                  since_version: 3
+                  ops:
+                    - op_id: 019a0000-0000-7000-8000-0000000000ff
+                      type: add_item
+                      slot: head
+                      item_id: 12345
+                      priority: 1
+                      base_version: 3
+                      source: companion
       responses:
         '200':
           description: Sync result.
@@ -877,6 +1082,7 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+
 components:
   securitySchemes:
     session:
@@ -993,7 +1199,7 @@ components:
           properties:
             code:
               type: string
-              examples: [unauthenticated, csrf_failed, rate_limited, not_found, version_mismatch, run_immutable, run_payload_mismatch, payload_too_large, upstream_unavailable, internal_error]
+              examples: [unauthenticated, csrf_failed, rate_limited, not_found, version_mismatch, list_limit_reached, item_not_forever, precondition_required, not_implemented, forbidden, run_immutable, run_payload_mismatch, payload_too_large, upstream_unavailable, internal_error]
             message: { type: string }
             request_id: { type: string }
     ValidationErrors:
@@ -1472,75 +1678,197 @@ components:
       enum: [head, neck, shoulder, back, chest, shirt, tabard, wrist, hands, waist, legs, feet, finger1, finger2, trinket1, trinket2, main_hand, off_hand, ranged]
     GearItem:
       type: object
-      required: [slot, item_id, priority]
+      description: |
+        Wishlist item. Uses **snake_case** `item_id` (equipped gear keeps camelCase `itemId`).
+        `icon_url` is always null until Blizzard documents a Forever static media namespace.
+      required: [slot, item_id, priority, obtained]
       properties:
         slot: { $ref: '#/components/schemas/GearSlot' }
-        item_id: { type: integer }
-        priority: { type: integer, minimum: 1 }
-        note: { type: string, maxLength: 200 }
+        item_id: { type: integer, minimum: 1 }
+        priority: { type: integer, minimum: 1, maximum: 50 }
+        note: { type: [string, 'null'], maxLength: 200 }
         obtained: { type: boolean }
+        obtained_at: { type: [string, 'null'], format: date-time }
+        obtained_run_id: { type: [string, 'null'], format: uuid }
+        icon_url: { type: 'null', description: Always null for now (Forever media namespace undocumented). }
     GearList:
       type: object
-      required: [id, member_id, name, version, items]
+      required: [id, character_id, owner_user_id, name, visibility, version, updated_at, items]
       properties:
         id: { type: string, format: uuid }
-        member_id: { type: string, format: uuid }
+        character_id: { type: string }
+        owner_user_id: { type: string, format: uuid }
         name: { type: string }
-        version: { type: integer, description: Last applied event sequence. }
-        items: { type: array, items: { $ref: '#/components/schemas/GearItem' } }
+        visibility: { type: string, enum: [private, guild] }
+        version: { type: integer, description: 'Last applied event sequence; concurrency token for ETag vN.' }
         updated_at: { type: string, format: date-time }
+        updated_source: { type: [string, 'null'], enum: [web, addon, companion, export, system, null] }
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/GearItem' }
     GearOp:
       type: object
       required: [op_id, type, slot, item_id, base_version]
+      additionalProperties: true  # unknown keys soft-ignored
       properties:
-        op_id: { type: string, format: uuid, description: 'Idempotency key (guild_id, op:op_id).' }
+        op_id: { type: string, format: uuid, description: 'Idempotency key (guild_id, op:<op_id>).' }
+        list_id: { type: string, format: uuid, description: 'Required in flat /sync ops; optional when nested under lists.' }
         type: { type: string, enum: [add_item, remove_item, reprioritize_item, mark_obtained] }
         slot: { $ref: '#/components/schemas/GearSlot' }
-        item_id: { type: integer }
-        priority: { type: integer, minimum: 1 }
+        item_id: { type: integer, minimum: 1 }
+        priority: { type: integer, minimum: 1, maximum: 50, description: 'Required for add_item and reprioritize_item.' }
         note: { type: string, maxLength: 200 }
+        obtained: { type: boolean, description: 'Required for mark_obtained; false = undo.' }
         run_id: { type: [string, 'null'], format: uuid }
-        base_version: { type: integer, minimum: 0 }
+        base_version: { type: integer, minimum: 0, description: 'List version the client last observed.' }
         client_ts: { type: string, format: date-time }
-        source: { type: string, enum: [web, addon] }
+        source: { type: string, enum: [web, addon, companion, export, system] }
+    GearEventActor:
+      type: object
+      required: [user_id, display_name]
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string, description: BattleTag }
     GearEvent:
       type: object
-      required: [version, event_type, recorded_at]
+      required: [version, event_type, recorded_at, source]
       properties:
         version: { type: integer }
         event_type:
           type: string
-          enum: [GearListCreated, GearItemAdded, GearItemRemoved, GearItemReprioritized, GearItemObtained, GearOpRejected]
-        payload: { type: object }
-        actor: { type: string }
-        source: { type: string, enum: [web, addon, system] }
+          enum: [GearListCreated, GearListRenamed, GearListDeleted, GearItemAdded, GearItemRemoved, GearItemReprioritized, GearItemObtained, GearOpRejected]
+        payload:
+          description: Per-type payload; see GearEventPayload*.
+          oneOf:
+            - { $ref: '#/components/schemas/GearEventPayloadCreated' }
+            - { $ref: '#/components/schemas/GearEventPayloadRenamed' }
+            - { $ref: '#/components/schemas/GearEventPayloadDeleted' }
+            - { $ref: '#/components/schemas/GearEventPayloadItemAdded' }
+            - { $ref: '#/components/schemas/GearEventPayloadItemRemoved' }
+            - { $ref: '#/components/schemas/GearEventPayloadItemReprioritized' }
+            - { $ref: '#/components/schemas/GearEventPayloadItemObtained' }
+            - { $ref: '#/components/schemas/GearEventPayloadRejected' }
+        actor: { oneOf: [{ $ref: '#/components/schemas/GearEventActor' }, { type: 'null' }] }
+        source: { type: string, enum: [web, addon, companion, export, system] }
         op_id: { type: [string, 'null'], format: uuid }
         recorded_at: { type: string, format: date-time }
+    GearEventPayloadCreated:
+      type: object
+      required: [name, character_id]
+      properties:
+        name: { type: string }
+        character_id: { type: string }
+        visibility: { type: string, enum: [private, guild] }
+    GearEventPayloadRenamed:
+      type: object
+      properties:
+        name: { type: string }
+        visibility: { type: string, enum: [private, guild] }
+    GearEventPayloadDeleted:
+      type: object
+      additionalProperties: false
+    GearEventPayloadItemAdded:
+      type: object
+      required: [slot, item_id, priority]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+        priority: { type: integer }
+        note: { type: [string, 'null'] }
+    GearEventPayloadItemRemoved:
+      type: object
+      required: [slot, item_id]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+    GearEventPayloadItemReprioritized:
+      type: object
+      required: [slot, item_id, priority]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+        priority: { type: integer }
+        from_priority: { type: integer }
+    GearEventPayloadItemObtained:
+      type: object
+      required: [slot, item_id, obtained]
+      properties:
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+        obtained: { type: boolean, description: false = undo }
+        run_id: { type: [string, 'null'], format: uuid }
+    GearEventPayloadRejected:
+      type: object
+      required: [op_id, reason]
+      properties:
+        op_id: { type: string, format: uuid }
+        reason: { type: string }
+        winning_seq: { type: integer }
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        item_id: { type: integer }
+        message: { type: string }
     GearConflict:
       type: object
       required: [op_id, reason]
       properties:
         op_id: { type: string, format: uuid }
-        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version] }
+        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version, item_not_forever] }
         winning_version: { type: integer }
         message: { type: string }
     GearOpsResult:
       type: object
-      required: [version, applied, duplicates, conflicts]
+      required: [version, applied, duplicates, conflicts, list]
       properties:
         version: { type: integer }
         applied: { type: array, items: { type: string, format: uuid } }
         duplicates: { type: array, items: { type: string, format: uuid } }
         conflicts: { type: array, items: { $ref: '#/components/schemas/GearConflict' } }
+        ignored:
+          type: array
+          items:
+            type: object
+            required: [op_id, keys]
+            properties:
+              op_id: { type: string, format: uuid }
+              keys: { type: array, items: { type: string } }
         list: { $ref: '#/components/schemas/GearList' }
+    GearVersionMismatch:
+      type: object
+      required: [error, current]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, const: version_mismatch }
+            message: { type: string }
+            request_id: { type: string }
+        current:
+          type: object
+          required: [version, list]
+          properties:
+            version: { type: integer }
+            list: { $ref: '#/components/schemas/GearList' }
     SyncRequest:
       type: object
+      description: |
+        Same payload for companion and export channels. Use `lists[]` or a flat `ops[]`
+        (each op must carry `list_id`) with top-level `since_version`.
+      required: [source]
+      additionalProperties: false
       properties:
-        runs:
+        schemaVersion: { type: integer, const: 1 }
+        source: { type: string, enum: [addon, companion, export] }
+        characterId: { type: string }
+        realm: { type: string }
+        name: { type: string }
+        since_version: { type: integer, minimum: 0, description: 'Used with flat ops array.' }
+        ops:
           type: array
-          maxItems: 100
-          items: { $ref: '#/components/schemas/RunUpload' }
-        gear:
+          maxItems: 200
+          items: { $ref: '#/components/schemas/GearOp' }
+        lists:
           type: array
           maxItems: 50
           items:
@@ -1552,19 +1880,16 @@ components:
               ops: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/GearOp' } }
     SyncResponse:
       type: object
-      required: [runs, gear]
+      required: [character_id, source, runs, gear]
       properties:
+        character_id: { type: string }
+        source: { type: string, enum: [web, addon, companion, export, system] }
         runs:
           type: array
+          description: Reserved for combined run+gear sync; empty in #17 gear-only sync.
           items:
             type: object
-            required: [addon_run_id, status]
-            properties:
-              addon_run_id: { type: string }
-              status: { type: string, enum: [created, updated, unchanged, error] }
-              run_id: { type: [string, 'null'], format: uuid }
-              created: { type: boolean }
-              error: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/ValidationErrors' }, { type: 'null' }] }
+            additionalProperties: true
         gear:
           type: array
           items:
@@ -1573,3 +1898,9 @@ components:
               list_id: { type: string, format: uuid }
               result: { $ref: '#/components/schemas/GearOpsResult' }
               events: { type: array, items: { $ref: '#/components/schemas/GearEvent' } }
+              error:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  request_id: { type: string }
