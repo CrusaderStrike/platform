@@ -16,7 +16,7 @@ info:
 
     **CORS:** origins `https://crusaderstrike.com` and `https://www.crusaderstrike.com`. Credentialed requests
     get `Access-Control-Allow-Credentials: true`, with methods `GET, POST, PUT, PATCH, DELETE, OPTIONS` and
-    headers `Content-Type, X-CSRF-Token, If-Match, Authorization`. Signup endpoints allow no credentials.
+    headers `Content-Type, X-CSRF-Token, If-Match, Authorization`.
 
     **CSRF:** `GET /auth/session` returns `csrf_token`, which is bound to the session. Every state-changing
     (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
@@ -35,8 +35,6 @@ servers:
 security:
   - session: []
 tags:
-  - name: signups
-    description: Public waitlist signups with double opt-in.
   - name: auth
     description: Blizzard OAuth, session, profile and character selection (platform#11).
   - name: guilds
@@ -52,54 +50,6 @@ tags:
   - name: profile
     description: Signed-in user profile and character roster (platform#11).
 paths:
-  /signups:
-    post:
-      tags: [signups]
-      operationId: createSignup
-      summary: Create signup (always 202)
-      description: |
-        Returns 202 for new and duplicate emails so callers can't tell which emails exist.
-        A filled honeypot field (`website`) also gets a fake 202 and nothing is stored.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SignupRequest' }
-      responses:
-        '202':
-          description: Pending confirmation.
-          headers: { $ref: '#/components/x-rate-headers' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PendingStatus' }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-  /signups/confirm:
-    post:
-      tags: [signups]
-      operationId: confirmSignup
-      summary: Confirm signup (single-use token, 48h)
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/TokenRequest' }
-      responses:
-        '200':
-          description: Confirmed.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { const: confirmed }
-        '400': { $ref: '#/components/responses/ValidationError' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
   /auth/blizzard/login:
     get:
       tags: [auth]
@@ -744,7 +694,7 @@ paths:
       description: |
         Max **5** active lists per character. A 6th create returns **409** `list_limit_reached`.
         Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
-        Gear writes are rate-limited (~60 writes/min per user, rolling window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+        Gear writes are rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - name: character_id
           in: path
@@ -810,7 +760,7 @@ paths:
         Mismatch → **409** `version_mismatch` with `current: { version, list }` so the client
         can re-apply without another GET. Only the **owner** may write; officers get **403** `forbidden`.
         Emits `GearListRenamed` (name and/or visibility in payload).
-        Missing If-Match → **428** `precondition_required`. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+        Missing If-Match → **428** `precondition_required`. Rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -907,7 +857,7 @@ paths:
         beyond `ops` are rejected (client `source` is ignored; server records `web`). Max 200 ops.
         Non-Forever `item_id` → the op is rejected; when a Forever catalog is enforced, clients
         should prefer **422** `item_not_forever` on single-item helpers — reserved code.
-        Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+        Rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -1045,7 +995,7 @@ paths:
 
         Conflict rules: auto-merge by slot/item; last-writer-wins by `recorded_at`; stale
         `base_version` loses; delete wins; losers → `GearOpRejected` in `conflicts[]`.
-        Max body 1 MiB. Rate-limited (~60 writes/min per user, rolling window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
+        Max body 1 MiB. Rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval) → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
         Per-list failures return a stable `error` object (no raw database messages).
         At most **500** ops total across all lists in one request.
       security: [{ uploaderToken: [] }, { session: [] }]
@@ -1204,38 +1154,12 @@ components:
             request_id: { type: string }
     ValidationErrors:
       type: object
-      description: Matches the signup contract.
+      description: Field-level validation errors (`errors` map of field → message).
       required: [errors]
       properties:
         errors:
           type: object
           additionalProperties: { type: string }
-    PendingStatus:
-      type: object
-      required: [status]
-      properties:
-        status: { const: pending }
-    TokenRequest:
-      type: object
-      required: [token]
-      properties:
-        token: { type: string }
-    SignupRequest:
-      type: object
-      required: [email, consent, consent_version]
-      additionalProperties: false
-      properties:
-        email: { type: string, format: email, maxLength: 254 }
-        character_name: { type: string, maxLength: 48 }
-        realm: { type: string, maxLength: 48 }
-        faction: { type: string, enum: [alliance, horde] }
-        guild_name: { type: string, maxLength: 48 }
-        interests:
-          type: array
-          items: { type: string, enum: [guild_site, dungeon_run, world_pvp, addon] }
-        consent: { const: true }
-        consent_version: { type: string }
-        website: { type: string, maxLength: 0, description: Honeypot; must be empty. }
     PageMeta:
       type: object
       required: [next_cursor]

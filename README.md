@@ -40,6 +40,13 @@ Or all-in-one: `docker compose up --build`.
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint:openapi` | Redocly lint |
 
+## Migrations
+
+Plain SQL files in `migrations/*.sql`, applied in name order by `npm run migrate` (and on API boot).
+Each applied file is checksummed in `schema_migrations`. **Never edit a migration after it has been
+applied** anywhere (prod, staging, or a shared dev DB) — add a new numbered file instead. The migrator
+refuses to start if an applied file's contents drift.
+
 ## Auth endpoints (platform#11)
 
 Addon data upload (platform#3) is `POST /api/v1/uploads`: session + CSRF; `characterId` or

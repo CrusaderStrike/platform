@@ -280,6 +280,7 @@ curl -fsS https://api.crusaderstrike.com/healthz
    ```
    Or check out the previous `platform_HEAD` from `/root/image-digests.log` under `/opt/crusaderstrike/platform`, then `build api` + `up -d api` + healthz (still take a backup first if this rebuild can migrate).
 2. Migrations are forward-only (no down scripts). If the new migration is **not** backward-compatible with old code, do **not** only retag `:prev`. Stop writers, restore the pre-build dump through `docs/backups.md` (**Bot approval required**), then bring up the old image/SHA.
+3. **Applied migrations are immutable.** Never edit a `migrations/*.sql` file after it has been applied. `migrate()` stores a SHA-256 of each applied file in `schema_migrations.checksum` and aborts boot on mismatch. Ship schema changes as a new numbered file. (Editing `006` in place during #34 review was only safe because it had not been applied in prod yet.)
 
 ### Env file location
 `/opt/crusaderstrike/api.env` (root, 0600). **Never overwrite** — create with `install -m 0600` only when absent; afterward append (`>>`) or edit one line. Postgres **superuser** password stays in `/opt/crusaderstrike/.env` only; `api.env` may hold the migrate role password inside `DATABASE_URL`. Do not merge the files. Any `api.env.*.bak` snapshot must stay root-only `0600`, must not go to unencrypted offsite backup paths, and must be deleted once the change is verified.
