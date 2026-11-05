@@ -7,12 +7,9 @@ import { sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
 import { AppError } from '../lib/errors.js';
 import * as store from '../auth/store.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
+import { GEAR_SLOTS } from '../gear/schema.js';
 
-const SLOTS = new Set([
-  'head', 'neck', 'shoulder', 'back', 'chest', 'shirt', 'tabard', 'wrist', 'hands',
-  'waist', 'legs', 'feet', 'finger1', 'finger2', 'trinket1', 'trinket2',
-  'main_hand', 'off_hand', 'ranged',
-]);
+const SLOTS = new Set<string>(GEAR_SLOTS);
 const QUALITIES = new Set(['poor', 'common', 'uncommon', 'rare', 'epic', 'legendary', null]);
 
 export type GearDeps = {

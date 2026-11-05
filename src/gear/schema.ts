@@ -28,7 +28,7 @@ export const ITEM_NOT_FOREVER_CODE = 'item_not_forever';
 export const GEAR_SLOTS = [
   'head', 'neck', 'shoulder', 'back', 'chest', 'shirt', 'tabard', 'wrist', 'hands',
   'waist', 'legs', 'feet', 'finger1', 'finger2', 'trinket1', 'trinket2',
-  'main_hand', 'off_hand', 'ranged',
+  'main_hand', 'off_hand', 'ranged', 'ammo',
 ] as const;
 export type GearSlot = (typeof GEAR_SLOTS)[number];
 

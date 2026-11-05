@@ -2185,7 +2185,7 @@ components:
     GearSlot:
       type: string
       description: WoW Forever equipment slots (shared by web and addon).
-      enum: [head, neck, shoulder, back, chest, shirt, tabard, wrist, hands, waist, legs, feet, finger1, finger2, trinket1, trinket2, main_hand, off_hand, ranged]
+      enum: [head, neck, shoulder, back, chest, shirt, tabard, wrist, hands, waist, legs, feet, finger1, finger2, trinket1, trinket2, main_hand, off_hand, ranged, ammo]
     GearItem:
       type: object
       description: |
@@ -2220,7 +2220,7 @@ components:
         edited_at: { type: string, format: date-time, description: 'Same instant as updated_at / last event recorded_at' }
         slots:
           type: object
-          description: Map of all 19 GearSlots → item_id or null
+          description: Map of all 20 GearSlots → item_id or null
           additionalProperties: { type: [integer, 'null'] }
         version: { type: integer, description: 'Last applied event sequence; concurrency token for ETag vN.' }
         updated_at: { type: string, format: date-time }

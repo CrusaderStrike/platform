@@ -100,8 +100,97 @@ describe('Forever items catalog', () => {
     expect(mapInventoryType('FINGER')).toEqual({ slot: 'finger1', aliases: ['finger2'] });
     expect(mapInventoryType('WEAPON')).toEqual({ slot: 'main_hand', aliases: ['off_hand'] });
     expect(mapInventoryType('CLOAK')?.slot).toBe('back');
+    expect(mapInventoryType('TWOHWEAPON')?.slot).toBe('main_hand');
+    expect(mapInventoryType('2HWEAPON')?.slot).toBe('main_hand');
+    expect(mapInventoryType('RELIC')?.slot).toBe('ranged');
+    expect(mapInventoryType('AMMO')?.slot).toBe('ammo');
+    expect(mapInventoryType('THROWN')?.slot).toBe('ranged');
+    expect(mapInventoryType('TABARD')?.slot).toBe('tabard');
+    expect(mapInventoryType('TRINKET')).toEqual({ slot: 'trinket1', aliases: ['trinket2'] });
     expect(armorTypeFromClass(4, 3)).toBe('mail');
     expect(armorTypeFromClass(2, 7)).toBeNull();
+  });
+
+  it('IMPORT_INVENTORY_TYPES includes Forever TWOHWEAPON, RELIC, AMMO (not empty 2HWEAPON)', async () => {
+    const { IMPORT_INVENTORY_TYPES, IMPORT_EXCLUDED_ITEM_IDS } = await import('../src/items/mapping.js');
+    expect(IMPORT_INVENTORY_TYPES).toContain('TWOHWEAPON');
+    expect(IMPORT_INVENTORY_TYPES).toContain('RELIC');
+    expect(IMPORT_INVENTORY_TYPES).toContain('AMMO');
+    expect(IMPORT_INVENTORY_TYPES).not.toContain('2HWEAPON');
+    expect(IMPORT_EXCLUDED_ITEM_IDS.has(19082)).toBe(true); // Monster - Fire Arrow
+    expect(IMPORT_EXCLUDED_ITEM_IDS.has(19286)).toBe(true); // Fast Test Ammo
+  });
+
+  it('GEAR_SLOTS includes ammo as a 20th slot', async () => {
+    const { GEAR_SLOTS } = await import('../src/gear/schema.js');
+    expect(GEAR_SLOTS).toContain('ammo');
+    expect(GEAR_SLOTS).toHaveLength(20);
+  });
+
+  it('GET /api/v1/items?slot=ranged returns no AMMO items (ammo is its own slot)', async () => {
+    await items.upsertItem(ctx.pool, {
+      itemId: 22316,
+      name: 'Test Relic',
+      slot: 'ranged',
+      slotAliases: [],
+      inventoryType: 'RELIC',
+      quality: 'common',
+      itemLevel: 1,
+      requiredLevel: 0,
+      armorType: null,
+      itemClass: 4,
+      itemSubclass: 7,
+      stats: null,
+      iconUrl: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_relic.jpg',
+      iconName: 'inv_relic',
+      region: 'us',
+    });
+    await items.upsertItem(ctx.pool, {
+      itemId: 2512,
+      name: 'Rough Arrow',
+      slot: 'ammo',
+      slotAliases: [],
+      inventoryType: 'AMMO',
+      quality: 'common',
+      itemLevel: 1,
+      requiredLevel: 0,
+      armorType: null,
+      itemClass: 6,
+      itemSubclass: 2,
+      stats: null,
+      iconUrl: 'https://render.worldofwarcraft.com/forever-us/icons/56/inv_ammo_arrow_01.jpg',
+      iconName: 'inv_ammo_arrow_01',
+      region: 'us',
+    });
+    await items.setMeta(ctx.pool, { buildId: 'ammo-slot-test', itemCount: 2, region: 'us' });
+
+    const ranged = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=ranged' });
+    expect(ranged.statusCode).toBe(200);
+    const rangedBody = ranged.json() as { items: Array<{ item_id: number; slot: string; inventory_type: string }> };
+    expect(rangedBody.items.every((i) => i.inventory_type !== 'AMMO')).toBe(true);
+    expect(rangedBody.items.every((i) => i.slot !== 'ammo')).toBe(true);
+    expect(rangedBody.items.map((i) => i.item_id)).toContain(22316);
+    expect(rangedBody.items.map((i) => i.item_id)).not.toContain(2512);
+
+    const ammo = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=ammo' });
+    expect(ammo.statusCode).toBe(200);
+    const ammoBody = ammo.json() as { items: Array<{ item_id: number; slot: string; inventory_type: string }> };
+    expect(ammoBody.items).toHaveLength(1);
+    expect(ammoBody.items[0]).toMatchObject({ item_id: 2512, slot: 'ammo', inventory_type: 'AMMO' });
+  });
+
+  it('decideCatalogMetaActivation refuses setMeta on --only or item_errors > 0', async () => {
+    const { decideCatalogMetaActivation } = await import('../src/items/import-meta-policy.js');
+    expect(decideCatalogMetaActivation({ partialOnly: false, itemErrors: 0 })).toEqual({ setMeta: true });
+    const only = decideCatalogMetaActivation({ partialOnly: true, itemErrors: 0 });
+    expect(only.setMeta).toBe(false);
+    if (!only.setMeta) expect(only.message).toMatch(/--only/i);
+    const errs = decideCatalogMetaActivation({ partialOnly: false, itemErrors: 3 });
+    expect(errs.setMeta).toBe(false);
+    if (!errs.setMeta) expect(errs.message).toMatch(/item_errors=3/);
+    // --only wins even when errors are also present
+    const both = decideCatalogMetaActivation({ partialOnly: true, itemErrors: 9 });
+    expect(both.setMeta).toBe(false);
   });
 
   it('GET /api/v1/items filters by slot, class, q and returns snake_case Forever fields', async () => {
