@@ -66,10 +66,14 @@ paths:
         - name: return_to
           in: query
           description: |
-            Optional post-login path (platform#64). Same-origin relative path only: must start with a single `/`
-            after decoding once; no `//`, scheme/host, backslash, or encoded versions of those. Validated and
-            stored server-side with the OAuth state — the callback never reads `return_to` from the query.
+            Optional post-login path (platform#64, hardening #68). Same-origin relative path only: must start
+            with a single `/` after decoding once; no `//`, scheme/host, backslash, or encoded versions of those.
+            Also rejected after URL resolution if the path would leave the site origin (e.g. `/.//evil`).
+            Scheme-looking segments after the leading slash are rejected, including `/foo:bar`.
+            Validated with a shared helper and stored server-side with the OAuth state — the callback never
+            reads `return_to` from the query and re-runs the same helper on the stored value.
             Invalid or missing values soft-fall back to `/profile/` (login still redirects to Battle.net; no 400).
+            Accepted examples: `/profile/`, `/gear/`, `/@evil.com` (path on our origin).
           schema: { type: string, pattern: '^/(?![/\\])[^\\]*$', maxLength: 512 }
       responses:
         '302':

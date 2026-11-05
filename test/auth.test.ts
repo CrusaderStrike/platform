@@ -2,9 +2,11 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import {
   decryptSecret,
+  DEFAULT_RETURN_TO,
   encryptSecret,
   FORBIDDEN_TOKEN_ENC_KEYS,
   isSafeReturnTo,
+  resolveSafeReturnTo,
   safeWebRedirect,
   TokenDecryptError,
   validateTokenEncKey,
@@ -646,6 +648,109 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(String(reuse.headers.location)).toContain('/profile/');
     expect(String(reuse.headers.location)).toContain('reason=invalid_state');
+  });
+
+  it('expired stored return_to falls back to /profile/ (platform#68)', async () => {
+    // Removing the expires_at check in takeOauthState must make this fail.
+    ctx = await startTestApp();
+    const login = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/gear/',
+    });
+    expect(login.statusCode).toBe(302);
+    const authorizeUrl = login.headers.location as string;
+    const state = new URL(authorizeUrl).searchParams.get('state');
+    expect(state).toBeTruthy();
+    await ctx.pool.query(`UPDATE oauth_states SET expires_at = now() - interval '1 minute' WHERE state = $1`, [
+      state,
+    ]);
+    const { redirectTo } = ctx.mock.completeLogin({ authorizeUrl, outcome: 'ok' });
+    const cbUrl = new URL(redirectTo);
+    const callback = await ctx.app.inject({
+      method: 'GET',
+      url: cbUrl.pathname + cbUrl.search,
+    });
+    const loc = String(callback.headers.location);
+    expect(loc).toContain('/profile/');
+    expect(loc).toContain('reason=invalid_state');
+    expect(loc).not.toContain('/gear/');
+    expect(loc).not.toContain('auth=ok');
+  });
+
+  it('cross-login state/code tamper does not redirect to stored path (platform#68)', async () => {
+    ctx = await startTestApp();
+    const loginA = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/gear/',
+    });
+    const loginB = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/lists/',
+    });
+    const authA = loginA.headers.location as string;
+    const authB = loginB.headers.location as string;
+    const doneA = ctx.mock.completeLogin({ authorizeUrl: authA, outcome: 'ok' });
+    const doneB = ctx.mock.completeLogin({ authorizeUrl: authB, outcome: 'ok' });
+    const cbA = new URL(doneA.redirectTo);
+    const cbB = new URL(doneB.redirectTo);
+    const stateA = cbA.searchParams.get('state');
+    const codeB = cbB.searchParams.get('code');
+    expect(stateA).toBeTruthy();
+    expect(codeB).toBeTruthy();
+
+    const callback = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/v1/auth/blizzard/callback?code=${encodeURIComponent(codeB!)}&state=${encodeURIComponent(stateA!)}`,
+    });
+    const loc = String(callback.headers.location);
+    expect(loc).toContain('/profile/');
+    expect(loc).toContain('auth=error');
+    expect(loc).not.toContain('auth=ok');
+    expect(loc).not.toContain('/gear/');
+    expect(loc).not.toContain('/lists/');
+    expect(callback.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('regression: /.//evil soft-falls back; /@evil.com stays on-site (platform#68)', async () => {
+    ctx = await startTestApp();
+    const origin = 'https://crusaderstrike.com';
+
+    // /.//evil: passes the string checks but URL-resolve yields pathname "//evil" → reject.
+    expect(isSafeReturnTo('/.//evil')).toBe(true);
+    expect(() => safeWebRedirect(origin, '/.//evil')).toThrow();
+    expect(resolveSafeReturnTo(origin, '/.//evil')).toBe(DEFAULT_RETURN_TO);
+
+    const evilSlash = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=' + encodeURIComponent('/.//evil'),
+    });
+    expect(evilSlash.statusCode).toBe(302);
+    expect(String(evilSlash.headers.location)).toContain('oauth/authorize');
+    const doneEvil = ctx.mock.completeLogin({
+      authorizeUrl: evilSlash.headers.location as string,
+      outcome: 'ok',
+    });
+    const cbEvil = new URL(doneEvil.redirectTo);
+    const afterEvil = await ctx.app.inject({
+      method: 'GET',
+      url: cbEvil.pathname + cbEvil.search,
+    });
+    expect(String(afterEvil.headers.location)).toContain('/profile/');
+    expect(String(afterEvil.headers.location)).toContain('auth=ok');
+
+    // /@evil.com: accepted; resolves to a path on our origin (not userinfo).
+    expect(isSafeReturnTo('/@evil.com')).toBe(true);
+    expect(resolveSafeReturnTo(origin, '/@evil.com')).toBe('/@evil.com');
+    expect(safeWebRedirect(origin, '/@evil.com')).toContain('https://crusaderstrike.com/@evil.com');
+
+    const { location } = await signIn(ctx, { returnTo: '/@evil.com' });
+    expect(location).toContain('/@evil.com');
+    expect(location).toContain('auth=ok');
+    expect(location).not.toContain('auth=error');
+
+    // Documented: /foo:bar is rejected by the scheme-looking check.
+    expect(isSafeReturnTo('/foo:bar')).toBe(false);
+    expect(resolveSafeReturnTo(origin, '/foo:bar')).toBe(DEFAULT_RETURN_TO);
   });
 
   it('refresh returns CharacterList; second call within 60s → 429 Retry-After', async () => {
