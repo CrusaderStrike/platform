@@ -74,7 +74,8 @@ export async function startTestApp(opts?: {
   const url = await ensurePg();
   const pool = createPool(url);
   await pool.query(`
-    TRUNCATE item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
+    TRUNCATE upload_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs, guild_members, guilds,
+             item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
   `);
 
   const mock = await startMockBlizzard({

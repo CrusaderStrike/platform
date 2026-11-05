@@ -42,6 +42,10 @@ Or all-in-one: `docker compose up --build`.
 
 ## Auth endpoints (platform#11)
 
+Addon data upload (platform#3) is `POST /api/v1/uploads`: session + CSRF, `characterId` must be
+selected main/alt, strict schemaVersion 1, dedupe by `addon_run_id` / `addon_pvp_id` per guild+character.
+World PvP and battlegrounds from addon#15 are stored; BG stats keep `honorable_kills` only (no killing-blows).
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/v1/auth/blizzard/login` | Starts OAuth; `return_to` relative path |
@@ -53,6 +57,7 @@ Or all-in-one: `docker compose up --build`.
 | POST | `/api/v1/me/characters/refresh` | CSRF; 60s rate limit; 502 upstream |
 | PUT | `/api/v1/me/characters/selection` | `{main_id, alt_ids}` CSRF |
 | GET/PUT | `/api/v1/characters/{id}/gear` | Equipped set; `itemId` camelCase |
+| POST | `/api/v1/uploads` | Batch dungeon runs + world PvP + BGs (CSRF; selected character; idempotent) |
 
 ## Ops
 

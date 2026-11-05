@@ -22,7 +22,7 @@ info:
     (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
     `403` with code `csrf_failed`. Requests with a bearer `uploaderToken` are exempt.
 
-    **Body size:** JSON bodies are capped at 64 KB, except `/sync` (1 MB) and `/sync/savedvariables` (2 MB).
+    **Body size:** JSON bodies are capped at 64 KB, except `/uploads` and `/sync` (1 MB) and `/sync/savedvariables` (2 MB).
     Larger bodies get `413`.
 
     **Rate limits:** every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.
@@ -41,6 +41,8 @@ tags:
     description: Blizzard OAuth, session, profile and character selection (platform#11).
   - name: guilds
     description: Guild profile.
+  - name: uploads
+    description: Batch addon dungeon-run and PvP uploads (platform#3).
   - name: runs
     description: Addon run uploads and reads.
   - name: gear
@@ -448,6 +450,37 @@ paths:
                     properties:
                       items: { type: array, items: { $ref: '#/components/schemas/Member' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /uploads:
+    post:
+      tags: [uploads]
+      operationId: uploadAddonData
+      security: [{ session: [] }]
+      summary: Batch-upload dungeon runs and PvP records from the addon
+      description: |
+        Authenticated session upload for CrusaderStrike/addon export data (docs/run-schema.md,
+        docs/pvp-schema.md from addon#15). `characterId` must be the caller's selected main or alt.
+        Records are idempotent on `(guild_id, character_id, addon_run_id|addon_pvp_id)`.
+        Unknown `schemaVersion` → 400. Strict JSON (`additionalProperties: false`). Max body 1 MB.
+        Battleground `stats` stores `honorable_kills` only (no killing-blows metric).
+        Response counts `accepted`, `duplicate`, and `rejected` (with reasons).
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddonUpload' }
+      responses:
+        '200':
+          description: Ingest summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AddonUploadResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /runs:
     post:
       tags: [runs]
@@ -1082,6 +1115,97 @@ components:
         realm: { type: string, maxLength: 48 }
         time: { type: integer, description: Unix seconds. }
         source: { type: [string, 'null'], maxLength: 64 }
+
+    AddonUpload:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, characterId]
+      description: |
+        Batch envelope (schemaVersion 1). At least one of dungeonRuns, worldPvp, battlegrounds
+        must be non-empty. Caps match the addon: worldPvp ≤ 1000, battlegrounds ≤ 500, dungeonRuns ≤ 100.
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        characterId: { type: string, maxLength: 128, description: Platform opaque character id from selection. }
+        dungeonRuns:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/RunUploadStrict' }
+        worldPvp:
+          type: array
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/WorldPvpRecord' }
+        battlegrounds:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/BattlegroundRecord' }
+    RunUploadStrict:
+      allOf:
+        - { $ref: '#/components/schemas/RunUpload' }
+      description: Same as RunUpload but additionalProperties false for /uploads.
+      additionalProperties: false
+    WorldPvpRecord:
+      type: object
+      additionalProperties: false
+      required: [v, addon_pvp_id, time, result, honorable]
+      description: World PvP kill/death from addon#15 (pvp.world[]).
+      properties:
+        v: { type: integer, const: 1 }
+        addon_pvp_id: { type: string, maxLength: 200 }
+        time: { type: integer, description: Unix seconds (UTC). }
+        zone: { type: [string, 'null'], maxLength: 64 }
+        subzone: { type: [string, 'null'], maxLength: 64 }
+        result: { type: string, enum: [kill, death] }
+        honorable: { type: boolean }
+        killer_source: { type: [string, 'null'], enum: [target, combat_log, null] }
+        opponent:
+          type: [object, 'null']
+          additionalProperties: false
+          properties:
+            name: { type: [string, 'null'], maxLength: 48 }
+            realm: { type: [string, 'null'], maxLength: 48 }
+            class: { type: [string, 'null'], maxLength: 32 }
+            level: { type: [integer, 'null'] }
+            faction: { type: [string, 'null'], enum: [alliance, horde, null], description: Lowercase. }
+    BattlegroundRecord:
+      type: object
+      additionalProperties: false
+      required: [v, addon_pvp_id, mapId, mapName, startedAt, endedAt, durationSec, result]
+      description: Battleground match from addon#15 (pvp.battlegrounds[]). Stats store honorable_kills only.
+      properties:
+        v: { type: integer, const: 1 }
+        addon_pvp_id: { type: string, maxLength: 200 }
+        mapId: { type: integer }
+        mapName: { type: string, maxLength: 64 }
+        faction: { type: [string, 'null'], enum: [alliance, horde, null] }
+        startedAt: { type: integer, description: Unix seconds (UTC). }
+        endedAt: { type: integer, description: Unix seconds (UTC). }
+        durationSec: { type: integer, minimum: 0 }
+        result: { type: string, enum: [win, loss, left, draw] }
+        winner: { type: [integer, 'null'], enum: [0, 1, 255, null] }
+        stats:
+          type: object
+          additionalProperties: false
+          properties:
+            honorableKills: { type: integer, minimum: 0 }
+            deaths: { type: integer, minimum: 0 }
+            honor: { type: integer, minimum: 0 }
+    AddonUploadResult:
+      type: object
+      required: [accepted, duplicate, rejected, guild_id, character_id]
+      properties:
+        accepted: { type: integer }
+        duplicate: { type: integer }
+        rejected:
+          type: array
+          items:
+            type: object
+            required: [kind, id, reason]
+            properties:
+              kind: { type: string, enum: [dungeon_run, world_pvp, battleground] }
+              id: { type: string }
+              reason: { type: string }
+        guild_id: { type: string, format: uuid }
+        character_id: { type: string }
     RunUpload:
       type: object
       description: |
