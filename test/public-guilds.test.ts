@@ -16,7 +16,7 @@ async function seedPublicGuild(
     recruiting_needs?: unknown;
     pitch?: string;
     raid_timezone?: string;
-    public_member_count?: number;
+    public_member_count?: number | null;
     updated_at?: string;
   },
 ) {
@@ -47,7 +47,7 @@ async function seedPublicGuild(
       JSON.stringify([{ day: 'tue', start: '20:00', end: '23:00' }]),
       opts.raid_timezone ?? 'America/Los_Angeles',
       JSON.stringify({ type: 'discord', value: 'https://discord.gg/crusader' }),
-      opts.public_member_count ?? 42,
+      opts.public_member_count === undefined ? 42 : opts.public_member_count,
       opts.updated_at ?? null,
     ],
   );
@@ -215,8 +215,8 @@ describe('public guilds API (platform#37)', () => {
     const body = ok.json() as {
       region: string;
       name: string;
-      member_count: number;
-      raid_timezone: string;
+      member_count: number | null;
+      raid_timezone: string | null;
       emblem_url: string | null;
     };
     expect(body.region).toBe('us');
@@ -225,6 +225,7 @@ describe('public guilds API (platform#37)', () => {
     expect(body.raid_timezone).toBe('America/Los_Angeles');
     expect(body.emblem_url).toBeNull();
     expect(ok.headers.etag).toBeTruthy();
+    expect(String(ok.headers.etag).startsWith('W/')).toBe(false); // strong ETag
 
     const cached = await ctx.app.inject({
       method: 'GET',
@@ -255,10 +256,20 @@ describe('public guilds API (platform#37)', () => {
     expect(priv.json().error.code).toBe('not_found');
   });
 
-  it('sitemap includes region and paginates', async () => {
+  it('sitemap includes region and paginates; excludes private', async () => {
     const empty = await ctx.app.inject({ method: 'GET', url: '/api/v1/public/guilds/sitemap' });
     expect(empty.statusCode).toBe(200);
     expect(empty.json()).toEqual({ items: [], next_cursor: null });
+
+    await seedPublicGuild(ctx, {
+      name: 'Hidden',
+      realm_slug: 'emberfall',
+      realm_name: 'Emberfall',
+      guild_slug: 'hidden-map',
+      faction: 'horde',
+      public_listed: false,
+      updated_at: new Date(Date.UTC(2026, 10, 4, 12, 99)).toISOString(),
+    });
 
     for (let i = 0; i < 3; i++) {
       await seedPublicGuild(ctx, {
@@ -292,11 +303,125 @@ describe('public guilds API (platform#37)', () => {
     const b2 = page2.json() as { items: unknown[]; next_cursor: string | null };
     expect(b2.items).toHaveLength(1);
     expect(b2.next_cursor).toBeNull();
+    const allSlugs = [...b1.items, ...b2.items].map((i: { guild_slug: string }) => i.guild_slug);
+    expect(allSlugs).not.toContain('hidden-map');
+    expect(String(page1.headers.etag).startsWith('W/')).toBe(false);
   });
 
   it('does not treat sitemap as a region or realm slug', async () => {
     const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/public/guilds/sitemap' });
     expect(res.statusCode).toBe(200);
     expect(res.json().items).toEqual([]);
+  });
+
+  it('member_count is null when unset (never coalesced to 0); raid_timezone has no UTC fallback', async () => {
+    await seedPublicGuild(ctx, {
+      name: 'UnsetCounts',
+      realm_slug: 'emberfall',
+      realm_name: 'Emberfall',
+      guild_slug: 'unset-counts',
+      faction: 'alliance',
+      public_member_count: null,
+      raid_timezone: undefined, // seed default America/Los_Angeles — override below
+    });
+    // Overwrite timezone to null after insert (seed defaults LA).
+    await ctx.pool.query(
+      `UPDATE guilds SET raid_timezone = NULL, public_member_count = NULL WHERE guild_slug = 'unset-counts'`,
+    );
+    await seedPublicGuild(ctx, {
+      name: 'ZeroMembers',
+      realm_slug: 'emberfall',
+      realm_name: 'Emberfall',
+      guild_slug: 'zero-members',
+      faction: 'alliance',
+      public_member_count: 0,
+      raid_timezone: 'Europe/London',
+    });
+
+    const unset = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/public/guilds/us/emberfall/unset-counts',
+    });
+    expect(unset.statusCode).toBe(200);
+    expect(unset.json().member_count).toBeNull();
+    expect(unset.json().raid_timezone).toBeNull();
+
+    const zero = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/public/guilds/us/emberfall/zero-members',
+    });
+    expect(zero.statusCode).toBe(200);
+    expect(zero.json().member_count).toBe(0);
+    expect(zero.json().raid_timezone).toBe('Europe/London');
+  });
+
+  it('returns 429 + Retry-After when the public list bucket is exhausted', async () => {
+    const { hashIp } = await import('../src/guilds/rate-limit.js');
+    await ctx.pool.query(
+      `INSERT INTO public_api_rate_limits (ip_hash, bucket, window_start, hit_count)
+       VALUES ($1, 'list_detail', now(), 120)`,
+      [hashIp('127.0.0.1')],
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/public/guilds' });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBeTruthy();
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+    expect(res.json().error.code).toBe('rate_limited');
+    expect(res.headers['ratelimit-remaining']).toBe('0');
+  });
+
+  it('spoofed X-Forwarded-For from an untrusted peer does not change the rate-limit key', async () => {
+    const { hashIp } = await import('../src/guilds/rate-limit.js');
+    // Exhaust the bucket for the real peer 203.0.113.10 (not in TRUSTED_PROXY defaults).
+    await ctx.pool.query(
+      `INSERT INTO public_api_rate_limits (ip_hash, bucket, window_start, hit_count)
+       VALUES ($1, 'list_detail', now(), 120)`,
+      [hashIp('203.0.113.10')],
+    );
+    const spoofed = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/public/guilds',
+      remoteAddress: '203.0.113.10',
+      headers: { 'x-forwarded-for': '198.51.100.77' },
+    });
+    expect(spoofed.statusCode).toBe(429);
+
+    // Same spoofed XFF from a *trusted* proxy peer → keyed as 198.51.100.77 (fresh bucket).
+    const viaProxy = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/public/guilds',
+      remoteAddress: '10.0.0.5',
+      headers: { 'x-forwarded-for': '198.51.100.77' },
+    });
+    expect(viaProxy.statusCode).toBe(200);
+  });
+
+  it('list ETag is strong and changes when page contents change', async () => {
+    await seedPublicGuild(ctx, {
+      name: 'A',
+      realm_slug: 'emberfall',
+      realm_name: 'Emberfall',
+      guild_slug: 'etag-a',
+      faction: 'alliance',
+      updated_at: new Date(Date.UTC(2026, 10, 4, 10, 0)).toISOString(),
+    });
+    const first = await ctx.app.inject({ method: 'GET', url: '/api/v1/public/guilds' });
+    expect(first.statusCode).toBe(200);
+    const etag1 = String(first.headers.etag);
+    expect(etag1.startsWith('"')).toBe(true);
+    expect(etag1.startsWith('W/')).toBe(false);
+
+    await seedPublicGuild(ctx, {
+      name: 'B',
+      realm_slug: 'emberfall',
+      realm_name: 'Emberfall',
+      guild_slug: 'etag-b',
+      faction: 'horde',
+      // Older than A so A stays first-row; weak first-row etag would stay stable.
+      updated_at: new Date(Date.UTC(2026, 10, 4, 9, 0)).toISOString(),
+    });
+    const second = await ctx.app.inject({ method: 'GET', url: '/api/v1/public/guilds' });
+    expect(second.statusCode).toBe(200);
+    expect(String(second.headers.etag)).not.toBe(etag1);
   });
 });

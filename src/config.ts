@@ -47,6 +47,13 @@ const envSchema = z.object({
     .url()
     .default('https://api.crusaderstrike.com/api/v1/auth/blizzard/callback'),
   COOKIE_SECURE: bool.optional(),
+  /**
+   * Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-* we trust
+   * (Fastify trustProxy). Empty/false disables. Default: RFC1918 private ranges
+   * (Caddy on the docker network). Deploy: append TRUSTED_PROXY to api.env if
+   * the default is wrong for the host network.
+   */
+  TRUSTED_PROXY: z.string().default('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'),
 });
 
 export type Config = {
@@ -74,10 +81,21 @@ export type Config = {
   BLIZZARD_REDIRECT_URI: string;
   corsOrigins: string[];
   cookieSecure: boolean;
+  /** Fastify trustProxy value: false | true | CIDR list. */
+  trustProxy: boolean | string[];
 };
 
 function isProdEnv(nodeEnv: string, appEnv?: string): boolean {
   return nodeEnv === 'production' || (appEnv ?? '').toLowerCase() === 'production';
+}
+
+
+/** Parse TRUSTED_PROXY env into a Fastify trustProxy option. */
+export function parseTrustedProxy(raw: string | undefined): boolean | string[] {
+  const v = (raw ?? '').trim();
+  if (!v || v === 'false' || v === '0' || v.toLowerCase() === 'no') return false;
+  if (v === 'true' || v === '1' || v.toLowerCase() === 'yes') return true;
+  return v.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -157,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cookieSecure =
     v.COOKIE_SECURE ??
     (production || v.PUBLIC_WEB_ORIGIN.startsWith('https://'));
+  const trustProxy = parseTrustedProxy(v.TRUSTED_PROXY);
 
   return {
     NODE_ENV: v.NODE_ENV,
@@ -180,5 +199,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     BLIZZARD_REDIRECT_URI: v.BLIZZARD_REDIRECT_URI,
     corsOrigins,
     cookieSecure,
+    trustProxy,
   };
 }

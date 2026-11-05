@@ -23,6 +23,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   const app = Fastify({
     logger: opts.config.NODE_ENV !== 'test',
     genReqId: () => requestId(),
+    // Only honor X-Forwarded-* from TRUSTED_PROXY (Caddy on the docker network by default).
+    trustProxy: opts.config.trustProxy,
   });
 
   await app.register(cors, {

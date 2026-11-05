@@ -76,6 +76,20 @@ export function isForeverClass(value: string): boolean {
   return FOREVER_CLASSES.has(value.toLowerCase());
 }
 
+const IANA_ZONES = new Set(Intl.supportedValuesOf('timeZone'));
+
+/** True when `tz` is a canonical IANA time zone name (e.g. America/Los_Angeles). */
+export function isIanaTimeZone(tz: string): boolean {
+  return IANA_ZONES.has(tz);
+}
+
+/** Strong ETag from page payload bytes (list / sitemap). */
+export function etagForPage(kind: string, body: unknown): string {
+  const raw = `${kind}:${JSON.stringify(body)}`;
+  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  return `"${hash}"`;
+}
+
 function mapRow(r: PublicGuildRow): PublicGuildRow {
   return {
     ...r,
@@ -105,9 +119,11 @@ export function toDetail(row: PublicGuildRow) {
     pitch: row.pitch ?? '',
     recruiting_needs: Array.isArray(row.recruiting_needs) ? row.recruiting_needs : [],
     raid_schedule: Array.isArray(row.raid_schedule) ? row.raid_schedule : [],
-    raid_timezone: row.raid_timezone ?? 'UTC',
+    // No UTC fallback — officer write path must set a real IANA zone before listing.
+    raid_timezone: row.raid_timezone,
     contact: row.contact ?? { type: 'in_game', value: row.name },
-    member_count: row.public_member_count ?? 0,
+    // Officer-set only; null means unset (never coalesce to 0 / roster count).
+    member_count: row.public_member_count,
     emblem_url: null as string | null,
   };
 }

@@ -16,7 +16,8 @@ info:
 
     **CORS:** origins `https://crusaderstrike.com` and `https://www.crusaderstrike.com`. Credentialed requests
     get `Access-Control-Allow-Credentials: true`, with methods `GET, POST, PUT, PATCH, DELETE, OPTIONS` and
-    headers `Content-Type, X-CSRF-Token, If-Match, Authorization`.
+    headers `Content-Type, X-CSRF-Token, If-Match, If-None-Match, Authorization`. Exposed response headers
+    include `Retry-After`, `ETag`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`.
 
     **CSRF:** `GET /auth/session` returns `csrf_token`, which is bound to the session. Every state-changing
     (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
@@ -1350,14 +1351,24 @@ components:
                   day: { type: string, enum: [mon, tue, wed, thu, fri, sat, sun] }
                   start: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
                   end: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
-            raid_timezone: { type: string, maxLength: 64 }
+            raid_timezone:
+              type: [string, 'null']
+              maxLength: 64
+              description: >
+                IANA time zone name (e.g. America/Los_Angeles). Required non-null on the
+                officer write path before public_listed; null when unset. No UTC default.
             contact:
               type: object
               required: [type, value]
               properties:
                 type: { type: string, enum: [discord, in_game, url] }
                 value: { type: string, maxLength: 200 }
-            member_count: { type: integer, minimum: 0 }
+            member_count:
+              type: [integer, 'null']
+              minimum: 0
+              description: >
+                Officer-set public_member_count only. null when unset — never coalesced to 0
+                and never derived from COUNT(guild_members).
             emblem_url: { type: [string, 'null'], format: uri }
     PublicGuildList:
       type: object

@@ -18,13 +18,6 @@ export type PublicGuildDeps = { pool: Pool };
 
 const CACHE_CONTROL = 'public, max-age=300';
 
-function clientIp(req: FastifyRequest): string {
-  const xf = req.headers['x-forwarded-for'];
-  if (typeof xf === 'string' && xf.length > 0) return xf.split(',')[0]!.trim();
-  if (Array.isArray(xf) && xf[0]) return xf[0].split(',')[0]!.trim();
-  return req.ip || 'unknown';
-}
-
 function setRateHeaders(
   reply: FastifyReply,
   rate: Awaited<ReturnType<typeof checkPublicRateLimit>>,
@@ -40,7 +33,8 @@ async function enforceRate(
   reply: FastifyReply,
   bucket: PublicRateBucket,
 ): Promise<void> {
-  const rate = await checkPublicRateLimit(pool, clientIp(req), bucket);
+  // req.ip respects Fastify trustProxy (TRUSTED_PROXY); untrusted XFF is ignored.
+  const rate = await checkPublicRateLimit(pool, req.ip || 'unknown', bucket);
   setRateHeaders(reply, rate);
   if (!rate.allowed) {
     reply.header('Retry-After', String(rate.retryAfterSec));
@@ -137,11 +131,7 @@ export async function registerPublicGuildRoutes(
       })),
       next_cursor: page.next_cursor,
     };
-    const contentEtag = guilds.etagForGuild({
-      id: 'sitemap',
-      version: page.items.length,
-      updated_at: page.items[0]?.updated_at ?? new Date(0),
-    });
+    const contentEtag = guilds.etagForPage('sitemap', body);
     if (maybe304(req, reply, contentEtag)) return;
     cacheHeaders(reply, contentEtag);
     return body;
@@ -230,11 +220,7 @@ export async function registerPublicGuildRoutes(
       items: page.items.map(guilds.toSummary),
       next_cursor: page.next_cursor,
     };
-    const contentEtag = guilds.etagForGuild({
-      id: 'list',
-      version: page.items.length,
-      updated_at: page.items[0]?.updated_at ?? new Date(0),
-    });
+    const contentEtag = guilds.etagForPage('list', body);
     if (maybe304(req, reply, contentEtag)) return;
     cacheHeaders(reply, contentEtag);
     return body;
