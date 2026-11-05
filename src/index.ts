@@ -43,7 +43,7 @@ async function main() {
           retentionDays: config.GEAR_OP_NOOP_RETENTION_DAYS,
         });
   app.addHook('onClose', async () => {
-    noopRetention?.stop();
+    await noopRetention?.stop();
   });
   await app.listen({ port: config.PORT, host: '0.0.0.0' });
 }

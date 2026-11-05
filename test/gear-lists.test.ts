@@ -7,6 +7,7 @@ import {
   GEAR_OP_NOOP_RETENTION_DAYS,
   pruneExpiredNoopOpIds,
   resetWritePathPruneThrottleForTests,
+  runNoopRetentionTick,
   scheduleWritePathNoopPrune,
   setPruneExpiredNoopOpIdsForTests,
 } from '../src/gear/noop-retention.js';
@@ -2315,6 +2316,80 @@ describe('gear lists (platform#17)', () => {
       resetWritePathPruneThrottleForTests();
     }
   });
+
+  it('app role cannot delete non-expired noop rows via prune args', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+    const guildId = (
+      await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM gear_lists WHERE id = $1`, [
+        list.id,
+      ])
+    ).rows[0]!.guild_id;
+
+    const freshKey = `op:${randomUUID()}`;
+    await ctx.pool.query(
+      `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key, recorded_at)
+       VALUES ($1, $2, $3, now())`,
+      [guildId, list.id, freshKey],
+    );
+
+    const client = await ctx.pool.connect();
+    try {
+      await client.query(`SET ROLE crusaderstrike_app`);
+      await client.query(`SELECT set_config('app.guild_id', '', false)`);
+
+      // No p_now argument exists; shortest window still must not delete fresh rows.
+      const pruned = await pruneExpiredNoopOpIds(client, {
+        retentionDays: 1,
+        limit: 100000,
+      });
+      expect(pruned.deleted).toBe(0);
+
+      // days < 1 rejected inside the function
+      await expect(
+        client.query(`SELECT public.prune_gear_op_noop_ids(0, 100)`),
+      ).rejects.toThrow(/retention_days must be >= 1/i);
+
+      // 3-arg / infinity signature must not exist (dropped in 012)
+      await expect(
+        client.query(`SELECT public.prune_gear_op_noop_ids(1, 100, 'infinity'::timestamptz)`),
+      ).rejects.toThrow(/function public\.prune_gear_op_noop_ids/i);
+    } finally {
+      try {
+        await client.query(`RESET ROLE`);
+        await client.query(`SELECT set_config('app.guild_id', '', false)`);
+      } finally {
+        client.release();
+      }
+    }
+
+    expect(
+      (await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [freshKey]))
+        .rowCount,
+    ).toBe(1);
+  });
+
+  it('hourly prune tick: pool.connect failure is swallowed (no throw)', async () => {
+    const errors: unknown[] = [];
+    const fakePool = {
+      connect: async () => {
+        throw new Error('forced connect failure');
+      },
+    } as unknown as import('../src/db/pool.js').Pool;
+
+    await expect(
+      runNoopRetentionTick(fakePool, {
+        log: (msg, err) => {
+          if (err !== undefined) errors.push(err);
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(errors.length).toBe(1);
+    expect(String(errors[0])).toMatch(/forced connect failure/);
+  });
+
 
 
 });

@@ -9,52 +9,61 @@
 --
 -- Prune runs via SECURITY DEFINER so crusaderstrike_app (NOBYPASSRLS, FORCE RLS) can
 -- delete expired rows with no guild set. App role does NOT get table DELETE.
-
--- Align migrate role with initdb so SECURITY DEFINER bypasses FORCE RLS in all envs.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crusaderstrike_migrate') THEN
-    ALTER ROLE crusaderstrike_migrate WITH BYPASSRLS;
-  END IF;
-END
-$$;
+--
+-- PREREQUISITE: crusaderstrike_migrate must already have BYPASSRLS (prod: initdb/01-roles.sh).
+-- This migration does NOT ALTER ROLE (needs superuser; must not duplicate initdb).
+-- If the owner lacks BYPASSRLS, we fail clearly below so FORCE RLS cannot leave a no-op sweeper.
 
 -- recorded_at already exists (011); index supports cutoff scans.
 CREATE INDEX IF NOT EXISTS gear_op_noop_ids_recorded_at_idx
-  ON gear_op_noop_ids (recorded_at);
+  ON public.gear_op_noop_ids (recorded_at);
+
+-- Drop prior signatures from earlier #48 drafts (p_now was unsafe: app could pass 'infinity').
+DROP FUNCTION IF EXISTS public.prune_gear_op_noop_ids(integer, integer, timestamptz);
+DROP FUNCTION IF EXISTS public.prune_gear_op_noop_ids(integer, integer);
 
 -- Bounded prune: PK batch + FOR UPDATE SKIP LOCKED (multi-instance / write-path safe).
--- Owned by crusaderstrike_migrate (BYPASSRLS). Fixed search_path. Only deletes rows
--- older than p_retention_days relative to p_now.
-CREATE OR REPLACE FUNCTION prune_gear_op_noop_ids(
+-- Uses clock now() only — no caller-controlled timestamp.
+-- Owned by crusaderstrike_migrate (BYPASSRLS). Hardened search_path; schema-qualified table.
+CREATE OR REPLACE FUNCTION public.prune_gear_op_noop_ids(
   p_retention_days integer,
-  p_limit integer,
-  p_now timestamptz DEFAULT now()
+  p_limit integer
 ) RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   deleted_count integer;
+  days integer;
+  lim integer;
 BEGIN
-  IF p_retention_days IS NULL OR p_retention_days < 1 OR p_retention_days > 3650 THEN
-    RAISE EXCEPTION 'prune_gear_op_noop_ids: invalid retention_days %', p_retention_days;
+  -- Clamp to sane bounds (also reject NULL).
+  days := p_retention_days;
+  lim := p_limit;
+  IF days IS NULL OR days < 1 THEN
+    RAISE EXCEPTION 'prune_gear_op_noop_ids: retention_days must be >= 1 (got %)', p_retention_days;
   END IF;
-  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
-    RAISE EXCEPTION 'prune_gear_op_noop_ids: invalid limit %', p_limit;
+  IF days > 3650 THEN
+    days := 3650;
+  END IF;
+  IF lim IS NULL OR lim < 1 THEN
+    RAISE EXCEPTION 'prune_gear_op_noop_ids: limit must be >= 1 (got %)', p_limit;
+  END IF;
+  IF lim > 100000 THEN
+    lim := 100000;
   END IF;
 
   WITH doomed AS (
     SELECT guild_id, idempotency_key
-    FROM gear_op_noop_ids
-    WHERE recorded_at < p_now - make_interval(days => p_retention_days)
+    FROM public.gear_op_noop_ids
+    WHERE recorded_at < pg_catalog.now() - pg_catalog.make_interval(days => days)
     ORDER BY recorded_at
     FOR UPDATE SKIP LOCKED
-    LIMIT p_limit
+    LIMIT lim
   ),
   del AS (
-    DELETE FROM gear_op_noop_ids g
+    DELETE FROM public.gear_op_noop_ids g
     USING doomed d
     WHERE g.guild_id = d.guild_id
       AND g.idempotency_key = d.idempotency_key
@@ -66,8 +75,22 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION prune_gear_op_noop_ids(integer, integer, timestamptz) OWNER TO crusaderstrike_migrate;
+ALTER FUNCTION public.prune_gear_op_noop_ids(integer, integer) OWNER TO crusaderstrike_migrate;
 
-REVOKE ALL ON FUNCTION prune_gear_op_noop_ids(integer, integer, timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION prune_gear_op_noop_ids(integer, integer, timestamptz) TO crusaderstrike_app;
-GRANT EXECUTE ON FUNCTION prune_gear_op_noop_ids(integer, integer, timestamptz) TO crusaderstrike_migrate;
+DO $$
+DECLARE
+  bypass boolean;
+BEGIN
+  SELECT rolbypassrls INTO bypass
+  FROM pg_catalog.pg_roles
+  WHERE rolname = 'crusaderstrike_migrate';
+  IF bypass IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION
+      'crusaderstrike_migrate must have BYPASSRLS before prune_gear_op_noop_ids can run under FORCE RLS. Prod: run initdb/01-roles.sh (LOGIN BYPASSRLS). This migration does not ALTER ROLE.';
+  END IF;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.prune_gear_op_noop_ids(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.prune_gear_op_noop_ids(integer, integer) TO crusaderstrike_app;
+GRANT EXECUTE ON FUNCTION public.prune_gear_op_noop_ids(integer, integer) TO crusaderstrike_migrate;

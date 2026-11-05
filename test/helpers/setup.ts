@@ -62,6 +62,29 @@ async function ensurePg(): Promise<string> {
   await pg.start();
   await pg.createDatabase('crusaderstrike');
   databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/crusaderstrike`;
+  // Prod sets BYPASSRLS via initdb/01-roles.sh. Migration 012 requires it (no ALTER ROLE
+  // in-migration). Pre-create / align roles so the SECURITY DEFINER sweeper check passes.
+  {
+    const boot = createPool(databaseUrl);
+    try {
+      await boot.query(`
+        DO $do$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crusaderstrike_migrate') THEN
+            CREATE ROLE crusaderstrike_migrate NOLOGIN BYPASSRLS;
+          ELSE
+            ALTER ROLE crusaderstrike_migrate WITH BYPASSRLS;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crusaderstrike_app') THEN
+            CREATE ROLE crusaderstrike_app NOLOGIN NOBYPASSRLS;
+          END IF;
+        END
+        $do$;
+      `);
+    } finally {
+      await boot.end();
+    }
+  }
   await migrate(databaseUrl);
   return databaseUrl;
 }

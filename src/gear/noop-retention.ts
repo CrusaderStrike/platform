@@ -9,8 +9,9 @@
  * (still a no-op → applied with no version bump, or stale_base_version if the
  * list moved). base_version remains the conflict guard.
  *
- * Deletes go through SECURITY DEFINER prune_gear_op_noop_ids so crusaderstrike_app
- * can sweep with no guild context under FORCE RLS.
+ * Deletes go through SECURITY DEFINER public.prune_gear_op_noop_ids(days, limit)
+ * (clock now() only — no caller-controlled timestamp) so crusaderstrike_app can
+ * sweep with no guild context under FORCE RLS.
  */
 import type { Pool, PoolClient } from '../db/pool.js';
 
@@ -33,7 +34,6 @@ export const GEAR_OP_NOOP_WRITE_PRUNE_THROTTLE_MS = 60 * 1000; // 1 minute
 
 /**
  * Stable advisory-lock key for the hourly sweeper (one holder across instances).
- * hashtext('crusaderstrike:gear_op_noop_ids_prune') as a fixed int4 pair via two keys.
  */
 export const GEAR_OP_NOOP_PRUNE_LOCK_KEY1 = 0x4353_476e; // 'CSGn'
 export const GEAR_OP_NOOP_PRUNE_LOCK_KEY2 = 0x6f6f_7052; // 'oopR'
@@ -42,8 +42,6 @@ export type PruneNoopResult = { deleted: number };
 
 export type PruneNoopOpts = {
   retentionDays?: number;
-  /** Override "now" for tests (timestamptz). */
-  now?: Date;
   limit?: number;
 };
 
@@ -67,11 +65,10 @@ type PruneFn = (db: Db, opts?: PruneNoopOpts) => Promise<PruneNoopResult>;
 async function defaultPrune(db: Db, opts?: PruneNoopOpts): Promise<PruneNoopResult> {
   const days = opts?.retentionDays ?? resolveRetentionDays(process.env.GEAR_OP_NOOP_RETENTION_DAYS);
   const limit = opts?.limit ?? GEAR_OP_NOOP_PRUNE_BATCH;
-  const now = opts?.now ?? new Date();
 
   const r = await db.query<{ prune_gear_op_noop_ids: number }>(
-    `SELECT prune_gear_op_noop_ids($1::int, $2::int, $3::timestamptz) AS prune_gear_op_noop_ids`,
-    [days, limit, now.toISOString()],
+    `SELECT public.prune_gear_op_noop_ids($1::int, $2::int) AS prune_gear_op_noop_ids`,
+    [days, limit],
   );
   return { deleted: Number(r.rows[0]?.prune_gear_op_noop_ids ?? 0) };
 }
@@ -86,7 +83,7 @@ export function setPruneExpiredNoopOpIdsForTests(fn: PruneFn | null): void {
 
 /**
  * Delete expired gear_op_noop_ids via SECURITY DEFINER (works as app role, no guild).
- * Batched with FOR UPDATE SKIP LOCKED inside the SQL function.
+ * Batched with FOR UPDATE SKIP LOCKED inside the SQL function. Uses DB now() only.
  */
 export async function pruneExpiredNoopOpIds(
   db: Db,
@@ -143,8 +140,86 @@ export function scheduleWritePathNoopPrune(
 }
 
 export type NoopRetentionJob = {
-  stop: () => void;
+  /** Cancels timers and awaits any in-flight tick. */
+  stop: () => Promise<void>;
+  /** Exposed for tests. */
+  runOnceForTests: () => Promise<void>;
 };
+
+export type NoopRetentionTickOpts = {
+  retentionDays?: number;
+  log?: (msg: string, err?: unknown) => void;
+  debug?: (msg: string) => void;
+};
+
+/**
+ * One sweep pass. connect() is inside try/catch so a DB outage never becomes an
+ * unhandled rejection. If advisory unlock fails, the client is destroyed
+ * (release(true)) instead of returning a lock-holding session to the pool.
+ */
+export async function runNoopRetentionTick(
+  pool: Pool,
+  opts?: NoopRetentionTickOpts,
+): Promise<void> {
+  const retentionDays =
+    opts?.retentionDays ?? resolveRetentionDays(process.env.GEAR_OP_NOOP_RETENTION_DAYS);
+  const log =
+    opts?.log ??
+    ((msg, err) => {
+      if (err !== undefined) console.error(msg, err);
+      else console.log(msg);
+    });
+  const debug =
+    opts?.debug ??
+    opts?.log ??
+    ((msg: string) => {
+      console.debug(msg);
+    });
+
+  let client: PoolClient | null = null;
+  let locked = false;
+  let destroyClient = false;
+  try {
+    client = await pool.connect();
+    const got = await client.query<{ ok: boolean }>(
+      `SELECT pg_catalog.pg_try_advisory_lock($1, $2) AS ok`,
+      [GEAR_OP_NOOP_PRUNE_LOCK_KEY1, GEAR_OP_NOOP_PRUNE_LOCK_KEY2],
+    );
+    locked = Boolean(got.rows[0]?.ok);
+    if (!locked) {
+      debug('gear_op_noop_ids prune skipped (advisory lock held)');
+      return;
+    }
+    let total = 0;
+    for (let i = 0; i < 20; i++) {
+      const { deleted } = await pruneExpiredNoopOpIds(client, { retentionDays });
+      total += deleted;
+      if (deleted < GEAR_OP_NOOP_PRUNE_BATCH) break;
+    }
+    if (total > 0) {
+      log(`gear_op_noop_ids prune deleted=${total} retention_days=${retentionDays}`);
+    } else {
+      debug(`gear_op_noop_ids prune deleted=0 retention_days=${retentionDays}`);
+    }
+  } catch (err) {
+    log('gear_op_noop_ids prune failed', err);
+  } finally {
+    if (client) {
+      if (locked) {
+        try {
+          await client.query(`SELECT pg_catalog.pg_advisory_unlock($1, $2)`, [
+            GEAR_OP_NOOP_PRUNE_LOCK_KEY1,
+            GEAR_OP_NOOP_PRUNE_LOCK_KEY2,
+          ]);
+        } catch (err) {
+          log('gear_op_noop_ids prune unlock failed', err);
+          destroyClient = true;
+        }
+      }
+      client.release(destroyClient);
+    }
+  }
+}
 
 /**
  * Cheap periodic in-process prune. No external cron/queue.
@@ -162,57 +237,16 @@ export function startNoopRetentionJob(
   const intervalMs = opts?.intervalMs ?? GEAR_OP_NOOP_PRUNE_INTERVAL_MS;
   const retentionDays =
     opts?.retentionDays ?? resolveRetentionDays(process.env.GEAR_OP_NOOP_RETENTION_DAYS);
-  const log =
-    opts?.log ??
-    ((msg, err) => {
-      if (err !== undefined) console.error(msg, err);
-      else console.log(msg);
-    });
-  const debug =
-    opts?.log ??
-    ((msg: string) => {
-      console.debug(msg);
-    });
+  const log = opts?.log;
 
-  const tick = async () => {
-    const client = await pool.connect();
-    let locked = false;
-    try {
-      const got = await client.query<{ ok: boolean }>(
-        `SELECT pg_try_advisory_lock($1, $2) AS ok`,
-        [GEAR_OP_NOOP_PRUNE_LOCK_KEY1, GEAR_OP_NOOP_PRUNE_LOCK_KEY2],
-      );
-      locked = Boolean(got.rows[0]?.ok);
-      if (!locked) {
-        debug('gear_op_noop_ids prune skipped (advisory lock held)');
-        return;
-      }
-      let total = 0;
-      for (let i = 0; i < 20; i++) {
-        const { deleted } = await pruneExpiredNoopOpIds(client, { retentionDays });
-        total += deleted;
-        if (deleted < GEAR_OP_NOOP_PRUNE_BATCH) break;
-      }
-      if (total > 0) {
-        log(`gear_op_noop_ids prune deleted=${total} retention_days=${retentionDays}`);
-      } else {
-        debug(`gear_op_noop_ids prune deleted=0 retention_days=${retentionDays}`);
-      }
-    } catch (err) {
-      log('gear_op_noop_ids prune failed', err);
-    } finally {
-      if (locked) {
-        try {
-          await client.query(`SELECT pg_advisory_unlock($1, $2)`, [
-            GEAR_OP_NOOP_PRUNE_LOCK_KEY1,
-            GEAR_OP_NOOP_PRUNE_LOCK_KEY2,
-          ]);
-        } catch (err) {
-          log('gear_op_noop_ids prune unlock failed', err);
-        }
-      }
-      client.release();
-    }
+  let inFlight: Promise<void> | null = null;
+
+  const tick = () => {
+    if (inFlight) return inFlight;
+    inFlight = runNoopRetentionTick(pool, { retentionDays, log }).finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   };
 
   const initial = setTimeout(() => {
@@ -225,9 +259,11 @@ export function startNoopRetentionJob(
   if (typeof handle.unref === 'function') handle.unref();
 
   return {
-    stop: () => {
+    runOnceForTests: () => tick(),
+    stop: async () => {
       clearTimeout(initial);
       clearInterval(handle);
+      if (inFlight) await inFlight;
     },
   };
 }
