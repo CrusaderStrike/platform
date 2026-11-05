@@ -23,6 +23,7 @@ import {
   selectedCharacterIds,
   findCharacterByRealmName,
 } from '../uploads/store.js';
+import { pruneExpiredNoopOpIds } from './noop-retention.js';
 
 export type Db = Pool | PoolClient;
 
@@ -160,9 +161,8 @@ export async function countItems(db: Db, listId: string): Promise<number> {
 
 /**
  * Record a no-op op_id so retries stay deduped without bumping list.version.
- * Retention: gear_op_noop_ids has no TTL yet (rows are tiny; CASCADE on list/guild delete).
- * Align periodic cleanup with gear_list_events retention in a follow-up — do not let it
- * grow unbounded without a plan.
+ * Retention: 30 days (see GEAR_OP_NOOP_RETENTION_DAYS / platform#47). CASCADE on
+ * list/guild delete still applies. Opportunistic prune on write + hourly in-process job.
  */
 async function recordNoopOpId(
   db: Db,
@@ -177,6 +177,12 @@ async function recordNoopOpId(
      RETURNING idempotency_key`,
     [guildId, listId, idempotencyKey],
   );
+  // Opportunistic sweep (bounded); primary drain is the hourly job in index.ts.
+  try {
+    await pruneExpiredNoopOpIds(db, { limit: 200 });
+  } catch {
+    // Never fail a write because prune failed.
+  }
   return r.rowCount ? 'inserted' : 'duplicate';
 }
 

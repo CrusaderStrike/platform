@@ -420,6 +420,18 @@ If you cannot keep the previous key (compromise, lost key), deploy with only the
 ### Where the key is stored
 Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; never overwrite — append / rotate via `TOKEN_ENC_KEY_PREVIOUS`). Who can rotate: Platform Dev via Bot-approved deploy.
 
+
+## gear_op_noop_ids retention (platform#47)
+
+`gear_op_noop_ids` stores `op:<op_id>` markers for no-op `set_slot` / `clear_slot` so retries stay in `duplicates[]` without bumping `list.version`.
+
+| | |
+|---|---|
+| **Retention window** | **30 days** (`GEAR_OP_NOOP_RETENTION_DAYS` in `src/gear/noop-retention.ts`) |
+| **Rationale** | No documented addon gear offline-replay TTL in groom/sync docs. Align with addon loot SavedVariables retention (keep un-uploaded drops ≥ 30 days) so companion/addon retries within that horizon still dedupe. |
+| **Prune** | In-process hourly job started from `src/index.ts` (no external cron/queue), plus a bounded opportunistic delete on each noop write. Index: `gear_op_noop_ids_recorded_at_idx` on `recorded_at` (migration 012). |
+| **Ops note** | Rows also CASCADE when a list or guild is deleted. Changing the window is a code + docs change (and ideally a regression test update); no env var. |
+
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.
 - Any paid DO change (resize, extra uptime checks, backups, Spaces) needs a price check with Bot first.

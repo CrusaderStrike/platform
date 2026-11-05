@@ -3,6 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { startTestApp, signIn, shutdownEmbeddedPg, type TestCtx } from './helpers/setup.js';
 import * as gear from '../src/gear/store.js';
 import * as foreverItems from '../src/items/store.js';
+import {
+  GEAR_OP_NOOP_RETENTION_DAYS,
+  pruneExpiredNoopOpIds,
+} from '../src/gear/noop-retention.js';
 
 
 async function clearCooldown(ctx: TestCtx) {
@@ -2045,6 +2049,158 @@ describe('gear lists (platform#17)', () => {
       expect.objectContaining({ op_id: addStaleId, reason: 'stale_base_version' }),
     ]);
     expect(addStaleBody.gear[0]!.result.list.items).toEqual([]);
+  });
+
+
+
+  it('gear_op_noop_ids retention: in-window retries dedupe; older rows prune (platform#47)', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+
+    await clearCooldown(ctx);
+    // Establish head=16846 at version 2
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [{ op_id: randomUUID(), type: 'set_slot', slot: 'head', item_id: 16846, base_version: 1 }],
+      },
+    });
+
+    await clearCooldown(ctx);
+    const freshNoopId = randomUUID();
+    const freshNoop = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(freshNoop.statusCode).toBe(200);
+    expect((freshNoop.json() as { applied: string[]; version: number }).applied).toEqual([
+      freshNoopId,
+    ]);
+    expect((freshNoop.json() as { version: number }).version).toBe(2);
+
+    const freshKey = `op:${freshNoopId}`;
+    const before = await ctx.pool.query(
+      `SELECT idempotency_key, recorded_at FROM gear_op_noop_ids WHERE idempotency_key = $1`,
+      [freshKey],
+    );
+    expect(before.rowCount).toBe(1);
+
+    // Age a separate marker past the retention window, keep the fresh one.
+    const staleKey = `op:${randomUUID()}`;
+    const guildId = (
+      await ctx.pool.query<{ guild_id: string }>(`SELECT guild_id FROM gear_lists WHERE id = $1`, [
+        list.id,
+      ])
+    ).rows[0]!.guild_id;
+    await ctx.pool.query(
+      `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key, recorded_at)
+       VALUES ($1, $2, $3, now() - make_interval(days => $4))`,
+      [guildId, list.id, staleKey, GEAR_OP_NOOP_RETENTION_DAYS + 1],
+    );
+
+    const pruned = await pruneExpiredNoopOpIds(ctx.pool);
+    expect(pruned.deleted).toBeGreaterThanOrEqual(1);
+
+    const staleGone = await ctx.pool.query(
+      `SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`,
+      [staleKey],
+    );
+    expect(staleGone.rowCount).toBe(0);
+
+    const freshStill = await ctx.pool.query(
+      `SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`,
+      [freshKey],
+    );
+    expect(freshStill.rowCount).toBe(1);
+
+    // In-window retry still dedupes.
+    await clearCooldown(ctx);
+    const retry = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(retry.statusCode).toBe(200);
+    const retryBody = retry.json() as {
+      duplicates: string[];
+      applied: string[];
+      version: number;
+    };
+    expect(retryBody.duplicates).toEqual([freshNoopId]);
+    expect(retryBody.applied).toEqual([]);
+    expect(retryBody.version).toBe(2);
+
+    // Age the fresh marker past the window and prune — retry is no longer a duplicate.
+    await ctx.pool.query(
+      `UPDATE gear_op_noop_ids
+       SET recorded_at = now() - make_interval(days => $2)
+       WHERE idempotency_key = $1`,
+      [freshKey, GEAR_OP_NOOP_RETENTION_DAYS + 1],
+    );
+    const prunedFresh = await pruneExpiredNoopOpIds(ctx.pool);
+    expect(prunedFresh.deleted).toBeGreaterThanOrEqual(1);
+    expect(
+      (
+        await ctx.pool.query(`SELECT 1 FROM gear_op_noop_ids WHERE idempotency_key = $1`, [
+          freshKey,
+        ])
+      ).rowCount,
+    ).toBe(0);
+
+    await clearCooldown(ctx);
+    const afterExpiry = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: freshNoopId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: 2,
+          },
+        ],
+      },
+    });
+    expect(afterExpiry.statusCode).toBe(200);
+    const afterBody = afterExpiry.json() as {
+      applied: string[];
+      duplicates: string[];
+      version: number;
+    };
+    // Re-evaluates as a no-op again (same slot state); not a duplicate after prune.
+    expect(afterBody.duplicates).toEqual([]);
+    expect(afterBody.applied).toEqual([freshNoopId]);
+    expect(afterBody.version).toBe(2);
   });
 
 
