@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "characterId": "PLACEHOLDER",
+  "dungeonRuns": [
+    {
+      "schemaVersion": 1,
+      "gameVersion": "forever",
+      "idempotencyKey": "Emberfall|Lightbringer|1730000000|36",
+      "addonRunId": "Emberfall|Lightbringer|1730000000|36",
+      "realm": "Emberfall",
+      "character": "Lightbringer",
+      "instance": { "id": 36, "name": "The Deadmines", "difficulty": 1, "difficultyName": "Normal" },
+      "startedAt": 1730000000,
+      "endedAt": 1730001800,
+      "durationSec": 1800,
+      "completed": true,
+      "status": "completed",
+      "party": [
+        { "name": "Lightbringer", "realm": "Emberfall", "class": "PALADIN", "level": 60, "isPlayer": true },
+        { "name": "Sidekick", "realm": "Emberfall", "class": "MAGE", "level": -1 }
+      ],
+      "bosses": [{ "npcId": 639, "name": "Edwin VanCleef", "killedAt": 1730001700 }],
+      "deaths": [],
+      "synced": true,
+      "exportRevision": 2
+    }
+  ],
+  "worldPvp": [
+    {
+      "v": 1,
+      "addon_pvp_id": "Emberfall|Lightbringer|W|1730000000|kill|1",
+      "time": 1730000000,
+      "zone": "Elwynn Forest",
+      "subzone": null,
+      "result": "kill",
+      "honorable": true,
+      "killer_source": null,
+      "opponent": { "name": "Enemy", "realm": "Emberfall", "class": "WARRIOR", "level": 60, "faction": "horde" },
+      "synced": true
+    }
+  ],
+  "battlegrounds": [
+    {
+      "v": 1,
+      "addon_pvp_id": "Emberfall|Lightbringer|BG|1730000000|489",
+      "mapId": 489,
+      "mapName": "Warsong Gulch",
+      "faction": "alliance",
+      "startedAt": 1730000000,
+      "endedAt": 1730000900,
+      "durationSec": 900,
+      "result": "win",
+      "winner": 1,
+      "stats": { "honorableKills": 12, "killingBlows": 5, "deaths": 3, "honor": 150 },
+      "synced": false
+    }
+  ]
+}

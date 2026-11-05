@@ -42,9 +42,11 @@ Or all-in-one: `docker compose up --build`.
 
 ## Auth endpoints (platform#11)
 
-Addon data upload (platform#3) is `POST /api/v1/uploads`: session + CSRF, `characterId` must be
-selected main/alt, strict schemaVersion 1, dedupe by `addon_run_id` / `addon_pvp_id` per guild+character.
-World PvP and battlegrounds from addon#15 are stored; BG stats keep `honorable_kills` only (no killing-blows).
+Addon data upload (platform#3) is `POST /api/v1/uploads`: session + CSRF; `characterId` or
+`realm`+`name` must resolve to a selected main/alt; schemaVersion 1; dedupe by
+`(character_id, addon_run_id|addon_pvp_id)` (guild not in the key). Envelope is strict; unknown
+keys on records/stats are soft-ignored. Whole-body limit is 1 MiB — clients split backlogs.
+World PvP and battlegrounds from addon#15 are stored; BG stats keep `honorable_kills` only.
 
 | Method | Path | Notes |
 |---|---|---|

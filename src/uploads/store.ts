@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from '../db/pool.js';
 import type { BattlegroundIn, DungeonRunIn, WorldPvpIn } from './schema.js';
+import { STATUS_RANK } from './schema.js';
 
 export type Db = Pool | PoolClient;
 
@@ -54,7 +55,38 @@ export function selectedCharacterIds(
   return new Set([selection.main_id, ...(selection.alt_ids ?? [])]);
 }
 
-export async function insertDungeonRun(
+export async function findCharacterByRealmName(
+  db: Db,
+  userId: string,
+  realm: string,
+  name: string,
+): Promise<{ id: string; character_name: string; realm: string | null } | null> {
+  const res = await db.query<{ id: string; character_name: string; realm: string | null }>(
+    `SELECT id, character_name, realm FROM characters
+     WHERE user_id = $1
+       AND lower(character_name) = lower($2)
+       AND realm IS NOT NULL
+       AND lower(realm) = lower($3)
+     LIMIT 1`,
+    [userId, name, realm],
+  );
+  return res.rows[0] ?? null;
+}
+
+function statusRankSql(column: string): string {
+  return `(CASE ${column}
+    WHEN 'in_progress' THEN 0
+    WHEN 'closed' THEN 1
+    WHEN 'completed' THEN 2
+    ELSE 0 END)`;
+}
+
+/**
+ * Upsert dungeon run. Dedupe key: (character_id, addon_run_id) — no guild_id.
+ * Status moves forward only (in_progress → closed → completed); never backward.
+ * Forward updates count as accepted; no-op / backward re-uploads count as duplicate.
+ */
+export async function upsertDungeonRun(
   db: Db,
   args: {
     guildId: string;
@@ -65,16 +97,40 @@ export async function insertDungeonRun(
 ): Promise<'accepted' | 'duplicate'> {
   const { run } = args;
   const durationMs = run.durationSec != null ? run.durationSec * 1000 : null;
-  const res = await db.query(
-    `INSERT INTO dungeon_runs (
-       guild_id, user_id, character_id, addon_run_id, schema_version, game_version,
-       dungeon_id, dungeon_name, difficulty, started_at, completed_at, duration_ms,
-       completed, status, party, bosses, deaths, raw_payload
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb
+  const newRank = STATUS_RANK[run.status];
+  const oldRank = statusRankSql('dungeon_runs.status');
+
+  const res = await db.query<{ inserted: boolean }>(
+    `WITH upsert AS (
+       INSERT INTO dungeon_runs (
+         guild_id, user_id, character_id, addon_run_id, schema_version, game_version,
+         dungeon_id, dungeon_name, difficulty, started_at, completed_at, duration_ms,
+         completed, status, party, bosses, deaths, raw_payload
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb
+       )
+       ON CONFLICT (character_id, addon_run_id) DO UPDATE SET
+         guild_id = EXCLUDED.guild_id,
+         user_id = EXCLUDED.user_id,
+         schema_version = EXCLUDED.schema_version,
+         game_version = EXCLUDED.game_version,
+         dungeon_id = EXCLUDED.dungeon_id,
+         dungeon_name = EXCLUDED.dungeon_name,
+         difficulty = EXCLUDED.difficulty,
+         started_at = EXCLUDED.started_at,
+         completed_at = EXCLUDED.completed_at,
+         duration_ms = EXCLUDED.duration_ms,
+         completed = EXCLUDED.completed,
+         status = EXCLUDED.status,
+         party = EXCLUDED.party,
+         bosses = EXCLUDED.bosses,
+         deaths = EXCLUDED.deaths,
+         raw_payload = EXCLUDED.raw_payload,
+         updated_at = now()
+       WHERE ${oldRank} < $19
+       RETURNING (xmax = 0) AS inserted
      )
-     ON CONFLICT (guild_id, character_id, addon_run_id) DO NOTHING
-     RETURNING id`,
+     SELECT inserted FROM upsert`,
     [
       args.guildId,
       args.userId,
@@ -94,9 +150,12 @@ export async function insertDungeonRun(
       JSON.stringify(run.bosses),
       JSON.stringify(run.deaths),
       JSON.stringify(run),
+      newRank,
     ],
   );
-  return res.rowCount && res.rowCount > 0 ? 'accepted' : 'duplicate';
+
+  if (!res.rowCount) return 'duplicate';
+  return 'accepted';
 }
 
 export async function insertWorldPvp(
@@ -109,15 +168,20 @@ export async function insertWorldPvp(
   },
 ): Promise<'accepted' | 'duplicate'> {
   const { rec } = args;
-  const res = await db.query(
-    `INSERT INTO pvp_world_events (
-       guild_id, user_id, character_id, addon_pvp_id, record_version,
-       occurred_at, zone, subzone, result, honorable, killer_source, opponent, raw_payload
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb
+  const res = await db.query<{ inserted: boolean }>(
+    `WITH upsert AS (
+       INSERT INTO pvp_world_events (
+         guild_id, user_id, character_id, addon_pvp_id, record_version,
+         occurred_at, zone, subzone, result, honorable, killer_source, opponent, raw_payload
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb
+       )
+       ON CONFLICT (character_id, addon_pvp_id) DO UPDATE SET
+         guild_id = EXCLUDED.guild_id
+       WHERE pvp_world_events.guild_id IS DISTINCT FROM EXCLUDED.guild_id
+       RETURNING (xmax = 0) AS inserted
      )
-     ON CONFLICT (guild_id, character_id, addon_pvp_id) DO NOTHING
-     RETURNING id`,
+     SELECT inserted FROM upsert`,
     [
       args.guildId,
       args.userId,
@@ -134,7 +198,9 @@ export async function insertWorldPvp(
       JSON.stringify(rec),
     ],
   );
-  return res.rowCount && res.rowCount > 0 ? 'accepted' : 'duplicate';
+  if (!res.rowCount) return 'duplicate';
+  // Guild-only touch still returns a row with inserted=false — count as duplicate (no double-count).
+  return res.rows[0]!.inserted ? 'accepted' : 'duplicate';
 }
 
 export async function insertBattleground(
@@ -147,16 +213,21 @@ export async function insertBattleground(
   },
 ): Promise<'accepted' | 'duplicate'> {
   const { rec } = args;
-  const res = await db.query(
-    `INSERT INTO pvp_battlegrounds (
-       guild_id, user_id, character_id, addon_pvp_id, record_version,
-       map_id, map_name, faction, started_at, ended_at, duration_sec,
-       result, winner, stats, raw_payload
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb
+  const res = await db.query<{ inserted: boolean }>(
+    `WITH upsert AS (
+       INSERT INTO pvp_battlegrounds (
+         guild_id, user_id, character_id, addon_pvp_id, record_version,
+         map_id, map_name, faction, started_at, ended_at, duration_sec,
+         result, winner, stats, raw_payload
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb
+       )
+       ON CONFLICT (character_id, addon_pvp_id) DO UPDATE SET
+         guild_id = EXCLUDED.guild_id
+       WHERE pvp_battlegrounds.guild_id IS DISTINCT FROM EXCLUDED.guild_id
+       RETURNING (xmax = 0) AS inserted
      )
-     ON CONFLICT (guild_id, character_id, addon_pvp_id) DO NOTHING
-     RETURNING id`,
+     SELECT inserted FROM upsert`,
     [
       args.guildId,
       args.userId,
@@ -175,7 +246,8 @@ export async function insertBattleground(
       JSON.stringify(rec),
     ],
   );
-  return res.rowCount && res.rowCount > 0 ? 'accepted' : 'duplicate';
+  if (!res.rowCount) return 'duplicate';
+  return res.rows[0]!.inserted ? 'accepted' : 'duplicate';
 }
 
 function normalizeBgStats(
@@ -190,6 +262,7 @@ function normalizeBgStats(
 
 const UPLOAD_COOLDOWN_MS = 5_000;
 
+/** Read-only check; does not burn the window. */
 export async function checkUploadRateLimit(
   db: Db,
   userId: string,
@@ -203,12 +276,16 @@ export async function checkUploadRateLimit(
     const retryAfter = Math.ceil((last.getTime() + UPLOAD_COOLDOWN_MS - Date.now()) / 1000);
     if (retryAfter > 0) return { ok: false, retryAfterSec: retryAfter };
   }
+  return { ok: true };
+}
+
+/** Record cooldown only after a successful upload batch (accepted or duplicate). */
+export async function touchUploadRateLimit(db: Db, userId: string): Promise<void> {
   await db.query(
     `INSERT INTO upload_rate_limits (user_id, last_at) VALUES ($1, now())
      ON CONFLICT (user_id) DO UPDATE SET last_at = now()`,
     [userId],
   );
-  return { ok: true };
 }
 
 export async function clearUploadRateLimit(db: Db, userId?: string): Promise<void> {

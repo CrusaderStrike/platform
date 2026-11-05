@@ -22,7 +22,7 @@ info:
     (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
     `403` with code `csrf_failed`. Requests with a bearer `uploaderToken` are exempt.
 
-    **Body size:** JSON bodies are capped at 64 KB, except `/uploads` and `/sync` (1 MB) and `/sync/savedvariables` (2 MB).
+    **Body size:** JSON bodies are capped at 64 KB, except `/uploads` and `/sync` (1 MiB, whole body; clients split backlogs across requests) and `/sync/savedvariables` (2 MB).
     Larger bodies get `413`.
 
     **Rate limits:** every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.
@@ -458,11 +458,15 @@ paths:
       summary: Batch-upload dungeon runs and PvP records from the addon
       description: |
         Authenticated session upload for CrusaderStrike/addon export data (docs/run-schema.md,
-        docs/pvp-schema.md from addon#15). `characterId` must be the caller's selected main or alt.
-        Records are idempotent on `(guild_id, character_id, addon_run_id|addon_pvp_id)`.
-        Unknown `schemaVersion` → 400. Strict JSON (`additionalProperties: false`). Max body 1 MB.
-        Battleground `stats` stores `honorable_kills` only (no killing-blows metric).
-        Response counts `accepted`, `duplicate`, and `rejected` (with reasons).
+        docs/pvp-schema.md from addon#15). Provide `characterId` (selected main/alt) **or**
+        `realm` + `name`. Records are idempotent on `(character_id, addon_run_id|addon_pvp_id)`
+        (guild is not part of the dedupe key). Unknown envelope keys → 400; unknown keys on
+        individual records/stats are soft-ignored (stripped), listed in `ignored`, and omitted
+        from stored `raw_payload`. Unknown `schemaVersion` → 400.
+        **Body size:** the 1 MiB limit covers the whole JSON body. Clients must split large
+        backlogs across multiple requests (respecting array caps and the 5s cooldown).
+        Battleground `stats` stores `honorable_kills` only (`killingBlows` is ignored).
+        Response counts `accepted`, `duplicate`, `rejected` (stable reason codes), and `ignored`.
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -485,9 +489,13 @@ paths:
     post:
       tags: [runs]
       operationId: uploadRun
+      deprecated: true
       security: [{ session: [] }, { uploaderToken: [] }]
       summary: Upload a run as the addon's JSON payload (schemaVersion 1)
       description: |
+        **Deprecated.** Prefer `POST /uploads` for batch ingest. Kept for the website paste /
+        CSRUN1 import path until that flow moves to `/uploads`.
+
         The body is exactly the addon's run JSON (CrusaderStrike/addon `docs/run-schema.md`, camelCase).
         The server stores the full JSON as `raw_payload`, and the `Run` response uses snake_case stored fields.
         **Idempotency and upgrade rules** on `(guild_id, addon_run_id)`, where `addon_run_id = addonRunId`:
@@ -1098,7 +1106,7 @@ components:
         name: { type: string, maxLength: 48 }
         realm: { type: string, maxLength: 48 }
         class: { $ref: '#/components/schemas/WowClass' }
-        level: { type: integer, minimum: 1 }
+        level: { type: [integer, 'null'], minimum: 1, maximum: 60, description: Values outside 1–60 (e.g. addon -1) are clamped to null. }
         isPlayer: { type: boolean, description: True for the logging character. }
     BossKill:
       type: object
@@ -1119,13 +1127,18 @@ components:
     AddonUpload:
       type: object
       additionalProperties: false
-      required: [schemaVersion, characterId]
+      required: [schemaVersion]
       description: |
-        Batch envelope (schemaVersion 1). At least one of dungeonRuns, worldPvp, battlegrounds
-        must be non-empty. Caps match the addon: worldPvp ≤ 1000, battlegrounds ≤ 500, dungeonRuns ≤ 100.
+        Batch envelope (schemaVersion 1). Provide `characterId` **or** `realm` + `name`.
+        At least one of dungeonRuns, worldPvp, battlegrounds must be non-empty.
+        Caps match the addon: worldPvp ≤ 1000, battlegrounds ≤ 500, dungeonRuns ≤ 100.
+        The 1 MiB body limit covers the whole request; clients split backlogs across requests.
+        Envelope is strict; unknown keys on records/stats are soft-ignored.
       properties:
         schemaVersion: { type: integer, const: 1 }
         characterId: { type: string, maxLength: 128, description: Platform opaque character id from selection. }
+        realm: { type: string, maxLength: 48, description: Alternative to characterId (with name). }
+        name: { type: string, maxLength: 48, description: Character name; use with realm. }
         dungeonRuns:
           type: array
           maxItems: 100
@@ -1139,15 +1152,43 @@ components:
           maxItems: 500
           items: { $ref: '#/components/schemas/BattlegroundRecord' }
     RunUploadStrict:
-      allOf:
-        - { $ref: '#/components/schemas/RunUpload' }
-      description: Same as RunUpload but additionalProperties false for /uploads.
-      additionalProperties: false
+      type: object
+      description: |
+        Dungeon-run record for /uploads. Known fields are validated; unknown keys (e.g. `synced`)
+        are soft-ignored, listed in the response `ignored` array, and omitted from stored raw_payload.
+      additionalProperties: true
+      required: [schemaVersion, gameVersion, idempotencyKey, addonRunId, realm, character, instance, startedAt, completed, status, party, bosses, deaths]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        gameVersion: { const: forever }
+        idempotencyKey: { $ref: '#/components/schemas/AddonRunId' }
+        addonRunId: { $ref: '#/components/schemas/AddonRunId' }
+        realm: { type: string, maxLength: 48 }
+        character: { type: string, maxLength: 48 }
+        instance:
+          type: object
+          required: [id, name]
+          additionalProperties: true
+          properties:
+            id: { type: integer, description: instanceMapID }
+            name: { type: string, maxLength: 64 }
+            difficulty: { type: [integer, 'null'] }
+            difficultyName: { type: [string, 'null'] }
+        startedAt: { type: integer, description: Unix seconds., minimum: 0, maximum: 4102444800 }
+        endedAt: { type: [integer, 'null'], minimum: 0, maximum: 4102444800 }
+        durationSec: { type: [integer, 'null'], minimum: 0, maximum: 2000000 }
+        completed: { type: boolean }
+        status: { type: string, enum: [in_progress, closed, completed] }
+        party: { type: array, minItems: 1, maxItems: 40, items: { $ref: '#/components/schemas/PartyMember' } }
+        bosses: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/BossKill' } }
+        deaths: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/Death' } }
     WorldPvpRecord:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [v, addon_pvp_id, time, result, honorable]
-      description: World PvP kill/death from addon#15 (pvp.world[]).
+      description: |
+        World PvP kill/death from addon#15 (pvp.world[]). Unknown keys such as `synced`
+        are soft-ignored.
       properties:
         v: { type: integer, const: 1 }
         addon_pvp_id: { type: string, maxLength: 200 }
@@ -1168,30 +1209,32 @@ components:
             faction: { type: [string, 'null'], enum: [alliance, horde, null], description: Lowercase. }
     BattlegroundRecord:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [v, addon_pvp_id, mapId, mapName, startedAt, endedAt, durationSec, result]
-      description: Battleground match from addon#15 (pvp.battlegrounds[]). Stats store honorable_kills only.
+      description: |
+        Battleground match from addon#15 (pvp.battlegrounds[]). Stats store honorable_kills only;
+        `killingBlows` and other unknown stats keys are soft-ignored.
       properties:
         v: { type: integer, const: 1 }
         addon_pvp_id: { type: string, maxLength: 200 }
         mapId: { type: integer }
         mapName: { type: string, maxLength: 64 }
         faction: { type: [string, 'null'], enum: [alliance, horde, null] }
-        startedAt: { type: integer, description: Unix seconds (UTC). }
-        endedAt: { type: integer, description: Unix seconds (UTC). }
-        durationSec: { type: integer, minimum: 0 }
+        startedAt: { type: integer, description: Unix seconds (UTC)., minimum: 0, maximum: 4102444800 }
+        endedAt: { type: integer, description: Unix seconds (UTC)., minimum: 0, maximum: 4102444800 }
+        durationSec: { type: integer, minimum: 0, maximum: 2000000 }
         result: { type: string, enum: [win, loss, left, draw] }
         winner: { type: [integer, 'null'], enum: [0, 1, 255, null] }
         stats:
           type: object
-          additionalProperties: false
+          additionalProperties: true
           properties:
             honorableKills: { type: integer, minimum: 0 }
             deaths: { type: integer, minimum: 0 }
             honor: { type: integer, minimum: 0 }
     AddonUploadResult:
       type: object
-      required: [accepted, duplicate, rejected, guild_id, character_id]
+      required: [accepted, duplicate, rejected, ignored, guild_id, character_id]
       properties:
         accepted: { type: integer }
         duplicate: { type: integer }
@@ -1203,7 +1246,19 @@ components:
             properties:
               kind: { type: string, enum: [dungeon_run, world_pvp, battleground] }
               id: { type: string }
-              reason: { type: string }
+              reason:
+                type: string
+                description: Stable codes such as character_mismatch, insert_failed (never raw DB text).
+        ignored:
+          type: array
+          description: Soft-ignored unknown keys stripped from records/stats before storage.
+          items:
+            type: object
+            required: [kind, id, keys]
+            properties:
+              kind: { type: string, enum: [dungeon_run, world_pvp, battleground, envelope] }
+              id: { type: string }
+              keys: { type: array, items: { type: string } }
         guild_id: { type: string, format: uuid }
         character_id: { type: string }
     RunUpload:

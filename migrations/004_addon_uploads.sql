@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS dungeon_runs (
   raw_payload     JSONB NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (guild_id, character_id, addon_run_id)
+  UNIQUE (character_id, addon_run_id)
 );
 
 CREATE INDEX IF NOT EXISTS dungeon_runs_user_id_idx ON dungeon_runs(user_id);
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS pvp_world_events (
   opponent        JSONB,
   raw_payload     JSONB NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (guild_id, character_id, addon_pvp_id)
+  UNIQUE (character_id, addon_pvp_id)
 );
 
 CREATE INDEX IF NOT EXISTS pvp_world_events_user_id_idx ON pvp_world_events(user_id);
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS pvp_battlegrounds (
   stats           JSONB NOT NULL DEFAULT '{}'::jsonb,
   raw_payload     JSONB NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (guild_id, character_id, addon_pvp_id)
+  UNIQUE (character_id, addon_pvp_id)
 );
 
 CREATE INDEX IF NOT EXISTS pvp_battlegrounds_user_id_idx ON pvp_battlegrounds(user_id);
