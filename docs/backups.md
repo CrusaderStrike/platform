@@ -41,20 +41,15 @@ This downloads to a private temp dir, decrypts, verifies, runs `dropdb --if-exis
 ## Production restore (overwrites live data)
 1. **Get Bot's OK first**, naming the object to restore. Do not proceed without it.
 2. Run a test restore of the same object (above) and check the counts.
-   **Key steps (production):** fetch `BACKUP_AGE_KEY` read-only from drewnix `/home/drew/.bot/secrets/shared` straight into RAM on the droplet, pass it with `--identity`, then shred it. Never print it or copy it to disk:
+   **Rule: the droplet must never get access to drewnix.** No ssh, keys, or credentials for drewnix on the droplet, and no droplet script references drewnix. The key streams **drewnix → box → droplet** on stdin only, exactly like the test restore.
+3. Run **from the box** (the key is read read-only on drewnix, piped through the box without touching its disk, and never printed):
 
-       # on the droplet (key never touches disk; /dev/shm is RAM)
-       umask 077; T=$(mktemp -p /dev/shm); chmod 600 $T
-       ssh drew@drewnix "sed -n 's/^BACKUP_AGE_KEY[=:][[:space:]]*//p' /home/drew/.bot/secrets/shared" > $T   # read-only
-       /opt/crusaderstrike/pg-restore.sh crusaderstrike-<UTC ts>.dump.age --production --yes-production --identity $T
-       shred -u $T
+       ssh drew@drewnix "sed -n 's/^BACKUP_AGE_KEY[=:][[:space:]]*//p' /home/drew/.bot/secrets/shared" \
+         | ssh root@24.199.127.192 '/opt/crusaderstrike/pg-restore.sh crusaderstrike-<UTC ts>.dump.age --production --yes-production --confirm-db crusaderstrike --identity -'
 
-   (The script also copies the identity into its own /dev/shm 0600 file and shreds it on exit.) If the restore fails after the stop, the EXIT trap restarts `api` (if present) and `caddy` and runs the `/healthz` check.
-3. Run:
+   Mask-safe: don't add `-x`, `tee`, or `echo` to this pipe, and don't log its stdin. On the droplet the script writes the identity to a 0600 file in `/dev/shm` (RAM) and its EXIT trap shreds it. If the restore fails after the stop, the trap restarts `api` (if present) and `caddy` and runs the `/healthz` check.
 
-       /opt/crusaderstrike/pg-restore.sh crusaderstrike-<UTC ts>.dump.age --production --yes-production --identity <0600 temp file>   # shred it afterwards
-
-   It asks you to type `crusaderstrike` to confirm, then:
+   Because stdin carries the key, confirmation is `--confirm-db crusaderstrike` (on an interactive tty without `--identity -` it asks you to type it). Then it:
    - stops writers: `docker compose -f /opt/crusaderstrike/docker-compose.yml -f /opt/crusaderstrike/docker-compose.caddy.yml stop caddy` (blocks all public API traffic), and `... stop api` once an `api` service exists (today the compose services are only `caddy` and `postgres`);
    - `pg_restore --clean --if-exists --no-owner --exit-on-error` into `crusaderstrike`, then prints row counts;
    - starts `api` (if present) and `caddy` again;
@@ -67,3 +62,4 @@ This downloads to a private temp dir, decrypts, verifies, runs `dropdb --if-exis
 - Re-run the test restore once real app tables exist.
 - 2026-11-04 (Pacific): switched to public-key-only. Backup `postgres/daily/crusaderstrike-20261105T024603Z.dump.age` encrypted with `age -R backup-age.pub`, rc=0, Healthchecks success ping sent (curl rc=0). Restore refused without identity (rc=2); test restore with `--identity` and with `AGE_IDENTITY` rc=0 (tables=0, DB still empty). Private key then shredded from the droplet.
 - 2026-11-04 (Pacific): review fixes. Backup `postgres/daily/crusaderstrike-20261105T025544Z.dump.age` rc=0; Healthchecks ping via `curl -K -` rc=0. Test restore with `--identity -` (identity in /dev/shm 0600, shredded; none left after) rc=0, tables=0; `s3cfg` was removed first and regenerated at 0600. Production-failure trap not exercised live (would take the site down).
+- 2026-11-04 (Pacific): production key flow changed to drewnix → box → droplet on stdin (droplet never reaches drewnix; grep of /opt/crusaderstrike, /root, /etc/cron* finds no drewnix reference). Added `--confirm-db`. Gate refused with key on stdin and no confirm (rc=2) and wrong confirm (rc=2), before any stop; no identity left in /dev/shm. Test restore with `--identity -` ok.

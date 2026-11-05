@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 AGE_KEY=${AGE_IDENTITY:-}; ARGS=()
-while [ $# -gt 0 ]; do case "$1" in --identity) AGE_KEY=${2:?--identity needs a file}; shift 2;; --identity=*) AGE_KEY=${1#*=}; shift;; *) ARGS+=("$1"); shift;; esac; done
+while [ $# -gt 0 ]; do case "$1" in --identity) AGE_KEY=${2:?--identity needs a file}; shift 2;; --identity=*) AGE_KEY=${1#*=}; shift;; --confirm-db) CONFIRM_DB=${2:?}; shift 2;; --confirm-db=*) CONFIRM_DB=${1#*=}; shift;; *) ARGS+=("$1"); shift;; esac; done
 set -- "${ARGS[@]}"
 OBJ=${1:?usage: pg-restore.sh <crusaderstrike-...dump.age> [--production --yes-production] (--identity <file> | AGE_IDENTITY=<file>)}
 MODE=test; [ "${2:-}" = --production ] && MODE=prod
@@ -51,6 +51,7 @@ CFG
   chmod 600 "$S3CFG"; echo "regenerated $S3CFG from backup.env"
 fi
 # Identity: copy to a 0600 file in /dev/shm (RAM), shredded by the EXIT trap. '-' reads it from stdin.
+AGE_KEY_SRC=$AGE_KEY
 if [ -n "$AGE_KEY" ]; then
   IDF=$(mktemp -p /dev/shm restore-id.XXXXXX); chmod 600 "$IDF"
   if [ "$AGE_KEY" = - ]; then cat > "$IDF"; else cat "$AGE_KEY" > "$IDF"; fi
@@ -75,7 +76,10 @@ fi
 
 # ---- Production restore: overwrites live data ----
 [ "${3:-}" = --yes-production ] || { echo "refusing: production restore needs --production --yes-production (and Bot's OK)"; exit 2; }
-read -r -p "Bot approved this restore? Type the database name (crusaderstrike) to overwrite it: " ans
+# With --identity - the key arrives on stdin, so confirm with --confirm-db crusaderstrike (or type it on a tty).
+if [ -n "${CONFIRM_DB:-}" ]; then ans=$CONFIRM_DB
+elif [ "$AGE_KEY_SRC" != - ] && [ -t 0 ]; then read -r -p "Bot approved this restore? Type the database name (crusaderstrike) to overwrite it: " ans
+else echo "refusing: key is on stdin; confirm with --confirm-db crusaderstrike"; exit 2; fi
 [ "$ans" = crusaderstrike ] || { echo "aborted"; exit 2; }
 echo "Stopping writers..."
 STOPPED=1
