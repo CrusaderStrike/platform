@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Restore a Spaces backup (platform#8).
+#   The age private key is NOT stored on the droplet: pass --identity <file> or set AGE_IDENTITY=<file>.
 #   Test (safe, default):  pg-restore.sh <object-name>            -> restores into restore_test, prints counts, drops it
 #   Production:            pg-restore.sh <object-name> --production --yes-production
 #     Production requires Bot's OK first (see docs/backups.md) and typing the db name to confirm.
 set -euo pipefail
 umask 077
-OBJ=${1:?usage: pg-restore.sh <crusaderstrike-...dump.age> [--production --yes-production]}
+AGE_KEY=${AGE_IDENTITY:-}; ARGS=()
+while [ $# -gt 0 ]; do case "$1" in --identity) AGE_KEY=${2:?--identity needs a file}; shift 2;; --identity=*) AGE_KEY=${1#*=}; shift;; *) ARGS+=("$1"); shift;; esac; done
+set -- "${ARGS[@]}"
+OBJ=${1:?usage: pg-restore.sh <crusaderstrike-...dump.age> [--production --yes-production] (--identity <file> | AGE_IDENTITY=<file>)}
 MODE=test; [ "${2:-}" = --production ] && MODE=prod
-S3CFG=/opt/crusaderstrike/s3cfg; AGE_KEY=/opt/crusaderstrike/backup-age.key
+case "$OBJ" in *.age) [ -n "$AGE_KEY" ] && [ -r "$AGE_KEY" ] || { echo "refusing: encrypted backup needs the age private key via --identity <file> or AGE_IDENTITY"; exit 2; };; esac
+S3CFG=/opt/crusaderstrike/s3cfg
 BUCKET=$(. /opt/crusaderstrike/backup.env; echo "$SPACES_BUCKET")
 PG=crusaderstrike-postgres-1; COMPOSE="docker compose -f /opt/crusaderstrike/docker-compose.yml -f /opt/crusaderstrike/docker-compose.caddy.yml"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
