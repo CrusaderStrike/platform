@@ -10,6 +10,7 @@ import { registerProfileRoutes } from './routes/profile.js';
 import { registerGearRoutes } from './routes/gear.js';
 import { registerUploadRoutes } from './routes/uploads.js';
 import { registerGearListRoutes } from './routes/gear-lists.js';
+import { registerPublicGuildRoutes } from './routes/public-guilds.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -22,6 +23,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   const app = Fastify({
     logger: opts.config.NODE_ENV !== 'test',
     genReqId: () => requestId(),
+    // Only honor X-Forwarded-* from TRUSTED_PROXY (Caddy on the docker network by default).
+    trustProxy: opts.config.trustProxy,
   });
 
   await app.register(cors, {
@@ -31,9 +34,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-CSRF-Token', 'If-Match', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'X-CSRF-Token', 'If-Match', 'If-None-Match', 'Authorization'],
     // So credentialed browser JS can read the 429 countdown on refresh.
-    exposedHeaders: ['Retry-After'],
+    exposedHeaders: ['Retry-After', 'ETag', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'],
   });
   await app.register(cookie);
 
@@ -87,6 +90,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
   await registerUploadRoutes(app, { pool: opts.pool });
   await registerGearListRoutes(app, { pool: opts.pool });
+  await registerPublicGuildRoutes(app, { pool: opts.pool });
 
   return app;
 }

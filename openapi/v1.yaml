@@ -16,7 +16,8 @@ info:
 
     **CORS:** origins `https://crusaderstrike.com` and `https://www.crusaderstrike.com`. Credentialed requests
     get `Access-Control-Allow-Credentials: true`, with methods `GET, POST, PUT, PATCH, DELETE, OPTIONS` and
-    headers `Content-Type, X-CSRF-Token, If-Match, Authorization`.
+    headers `Content-Type, X-CSRF-Token, If-Match, If-None-Match, Authorization`. Exposed response headers
+    include `Retry-After`, `ETag`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`.
 
     **CSRF:** `GET /auth/session` returns `csrf_token`, which is bound to the session. Every state-changing
     (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
@@ -39,6 +40,8 @@ tags:
     description: Blizzard OAuth, session, profile and character selection (platform#11).
   - name: guilds
     description: Guild profile.
+  - name: public
+    description: Anonymous public reads (no session).
   - name: uploads
     description: Batch addon dungeon-run and PvP uploads (platform#3).
   - name: runs
@@ -315,6 +318,122 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/guilds:
+    get:
+      tags: [public]
+      operationId: listPublicGuilds
+      summary: Browse public Forever guilds (platform#37)
+      security: []
+      parameters:
+        - name: region
+          in: query
+          description: Forever region filter (repeatable; OR). Lowercase us|eu|kr|tw.
+          schema: { type: string, enum: [us, eu, kr, tw] }
+          style: form
+          explode: true
+        - name: realm
+          in: query
+          schema: { type: string, maxLength: 48 }
+          description: Forever realm slug (kebab-case allowlist for selected region).
+        - name: faction
+          in: query
+          schema: { type: string, enum: [alliance, horde] }
+        - name: role
+          in: query
+          schema: { type: string, enum: [tank, healer, dps] }
+        - name: class
+          in: query
+          schema:
+            type: string
+            enum: [warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, druid]
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 25 }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of public guild summaries.
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+            RateLimit-Limit: { schema: { type: string } }
+            RateLimit-Remaining: { schema: { type: string } }
+            RateLimit-Reset: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicGuildList' }
+        '304': { description: Not modified. }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /public/guilds/sitemap:
+    get:
+      tags: [public]
+      operationId: listPublicGuildSitemap
+      summary: Cursor-paginated public guild sitemap (platform#37)
+      security: []
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sitemap page.
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicGuildSitemap' }
+        '304': { description: Not modified. }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /public/guilds/{region}/{realm_slug}/{guild_slug}:
+    get:
+      tags: [public]
+      operationId: getPublicGuild
+      summary: Public guild detail (platform#37)
+      security: []
+      parameters:
+        - name: region
+          in: path
+          required: true
+          schema: { type: string, enum: [us, eu, kr, tw] }
+          description: Forever region (lowercase). Invalid values → 404.
+        - name: realm_slug
+          in: path
+          required: true
+          schema: { type: string, maxLength: 48 }
+        - name: guild_slug
+          in: path
+          required: true
+          schema: { type: string, maxLength: 48 }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Public guild.
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicGuild' }
+        '304': { description: Not modified. }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
   /guild:
     get:
@@ -1186,6 +1305,94 @@ components:
     Faction:
       type: string
       enum: [alliance, horde]
+
+    PublicGuildSummary:
+      type: object
+      required: [region, realm_slug, realm_name, guild_slug, name, faction, recruiting, open_roles, updated_at]
+      properties:
+        region: { type: string, enum: [us, eu, kr, tw] }
+        realm_slug: { type: string }
+        realm_name: { type: string }
+        guild_slug: { type: string }
+        name: { type: string, maxLength: 48 }
+        faction: { type: string, enum: [alliance, horde] }
+        recruiting: { type: boolean }
+        open_roles:
+          type: array
+          items: { type: string, enum: [tank, healer, dps] }
+          uniqueItems: true
+        updated_at: { type: string, format: date-time }
+    PublicGuild:
+      allOf:
+        - { $ref: '#/components/schemas/PublicGuildSummary' }
+        - type: object
+          required: [pitch, recruiting_needs, raid_schedule, raid_timezone, contact, member_count]
+          properties:
+            pitch: { type: string, maxLength: 500 }
+            recruiting_needs:
+              type: array
+              maxItems: 40
+              items:
+                type: object
+                required: [class, role, priority]
+                properties:
+                  class:
+                    type: string
+                    enum: [warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, druid]
+                  role: { type: string, enum: [tank, healer, dps] }
+                  priority: { type: string, enum: [high, medium, low] }
+            raid_schedule:
+              type: array
+              maxItems: 14
+              items:
+                type: object
+                required: [day, start, end]
+                properties:
+                  day: { type: string, enum: [mon, tue, wed, thu, fri, sat, sun] }
+                  start: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+                  end: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+            raid_timezone:
+              type: [string, 'null']
+              maxLength: 64
+              description: >
+                IANA time zone name (e.g. America/Los_Angeles). Required non-null on the
+                officer write path before public_listed; null when unset. No UTC default.
+            contact:
+              type: object
+              required: [type, value]
+              properties:
+                type: { type: string, enum: [discord, in_game, url] }
+                value: { type: string, maxLength: 200 }
+            member_count:
+              type: [integer, 'null']
+              minimum: 0
+              description: >
+                Officer-set public_member_count only. null when unset — never coalesced to 0
+                and never derived from COUNT(guild_members).
+            emblem_url: { type: [string, 'null'], format: uri }
+    PublicGuildList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PublicGuildSummary' }
+        next_cursor: { type: [string, 'null'] }
+    PublicGuildSitemap:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [region, realm_slug, guild_slug, updated_at]
+            properties:
+              region: { type: string, enum: [us, eu, kr, tw] }
+              realm_slug: { type: string }
+              guild_slug: { type: string }
+              updated_at: { type: string, format: date-time }
+        next_cursor: { type: [string, 'null'] }
     GuildCreate:
       type: object
       required: [name, realm, region]
@@ -1737,7 +1944,7 @@ components:
       required: [op_id, reason]
       properties:
         op_id: { type: string, format: uuid }
-        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version, item_not_forever] }
+        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version, item_not_forever, list_items_limit] }
         winning_version: { type: integer }
         message: { type: string }
     GearOpsResult:
