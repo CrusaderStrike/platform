@@ -1,7 +1,9 @@
 /**
  * Gear list ops + sync envelope (platform#17).
  * Envelope is strict; unknown keys on individual ops are soft-ignored (uploads convention).
- * Sync path is agnostic: source companion | export | web | addon use the same op shape.
+ * Sync path is agnostic across addon|companion|export (same op shape).
+ * Source is server-derived: web routes force `web`; /sync accepts addon|companion|export only.
+ * Op `source` is soft-ignored; clients never set web|system on /sync.
  */
 import { z } from 'zod';
 import { normalizeRealm, normalizeRealmSql } from '../uploads/schema.js';
@@ -30,6 +32,9 @@ export type GearSlot = (typeof GEAR_SLOTS)[number];
 
 export const GEAR_SOURCES = ['web', 'addon', 'companion', 'export', 'system'] as const;
 export type GearSource = (typeof GEAR_SOURCES)[number];
+/** Client-facing /sync sources only. web and system are never accepted from clients. */
+export const SYNC_SOURCES = ['addon', 'companion', 'export'] as const;
+export type SyncSource = (typeof SYNC_SOURCES)[number];
 
 /** Addon-side channels for conflict "stale base loses to web". */
 export function isAddonSideSource(source: GearSource): boolean {
@@ -66,7 +71,7 @@ const OP_KEYS = new Set([
   'run_id',
   'base_version',
   'client_ts',
-  'source',
+  // `source` is intentionally NOT listed — soft-ignored; server derives source.
 ]);
 
 const ENVELOPE_KEYS = new Set([
@@ -97,7 +102,7 @@ function stripObject(
 
 const uuid = z.string().uuid();
 const slotSchema = z.enum(GEAR_SLOTS);
-const sourceSchema = z.enum(GEAR_SOURCES);
+export const sourceSchema = z.enum(GEAR_SOURCES);
 
 const opBodySchema = z
   .object({
@@ -112,7 +117,6 @@ const opBodySchema = z
     run_id: z.string().uuid().nullable().optional(),
     base_version: z.number().int().min(0),
     client_ts: z.string().datetime({ offset: true }).optional(),
-    source: sourceSchema.optional(),
   })
   .superRefine((op, ctx) => {
     if (op.type === 'add_item' || op.type === 'reprioritize_item') {
@@ -157,7 +161,7 @@ export type SyncListIn = {
 
 export type SyncEnvelope = {
   schemaVersion: number;
-  source: GearSource;
+  source: SyncSource;
   characterId?: string;
   realm?: string;
   name?: string;
@@ -191,9 +195,10 @@ export function parseSyncBody(
     };
   }
 
-  const sourceParsed = sourceSchema.safeParse(env.source ?? 'export');
+  const syncSourceSchema = z.enum(SYNC_SOURCES);
+  const sourceParsed = syncSourceSchema.safeParse(env.source ?? 'export');
   if (!sourceParsed.success) {
-    return { ok: false, fieldErrors: { source: 'Must be web|addon|companion|export|system.' } };
+    return { ok: false, fieldErrors: { source: 'Must be addon|companion|export (web/system not accepted from clients).' } };
   }
 
   const characterId = env.characterId === undefined ? undefined : String(env.characterId);

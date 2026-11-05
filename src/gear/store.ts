@@ -70,7 +70,7 @@ export type GearEventRow = {
 
 export type ActorInfo = { user_id: string; display_name: string };
 
-export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version';
+export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version' | 'item_not_forever';
 
 export type GearConflict = {
   op_id: string;
@@ -139,6 +139,11 @@ export function canWriteList(list: GearListRow, viewerUserId: string): boolean {
   return list.owner_user_id === viewerUserId && !list.deleted_at;
 }
 
+/**
+ * Append an event. Uses ON CONFLICT DO NOTHING so a 23505 never aborts the txn.
+ * Callers must hold FOR UPDATE on the list row (or create under an advisory lock)
+ * before choosing `seq`, so concurrent writers serialize on version.
+ */
 export async function appendEvent(
   db: Db,
   args: {
@@ -153,30 +158,41 @@ export async function appendEvent(
     occurredAt?: Date | null;
   },
 ): Promise<'inserted' | 'duplicate'> {
-  try {
-    await db.query(
-      `INSERT INTO gear_list_events (
-         guild_id, list_id, seq, event_type, schema_ver, payload, source, actor,
-         idempotency_key, occurred_at
-       ) VALUES ($1,$2,$3,$4,1,$5::jsonb,$6,$7,$8,$9)`,
-      [
-        args.guildId,
-        args.listId,
-        args.seq,
-        args.eventType,
-        JSON.stringify(args.payload),
-        args.source,
-        args.actor ? JSON.stringify(args.actor) : null,
-        args.idempotencyKey,
-        args.occurredAt ?? null,
-      ],
-    );
-    return 'inserted';
-  } catch (err) {
-    const code = (err as { code?: string }).code;
-    if (code === '23505') return 'duplicate'; // unique_violation
-    throw err;
-  }
+  const r = await db.query(
+    `INSERT INTO gear_list_events (
+       guild_id, list_id, seq, event_type, schema_ver, payload, source, actor,
+       idempotency_key, occurred_at
+     ) VALUES ($1,$2,$3,$4,1,$5::jsonb,$6,$7,$8,$9)
+     ON CONFLICT DO NOTHING
+     RETURNING seq`,
+    [
+      args.guildId,
+      args.listId,
+      args.seq,
+      args.eventType,
+      JSON.stringify(args.payload),
+      args.source,
+      args.actor ? JSON.stringify(args.actor) : null,
+      args.idempotencyKey,
+      args.occurredAt ?? null,
+    ],
+  );
+  return r.rowCount ? 'inserted' : 'duplicate';
+}
+
+/** Lock list row for the rest of the transaction. Returns null if missing. */
+export async function lockListForUpdate(db: Db, listId: string): Promise<GearListRow | null> {
+  const r = await db.query<GearListRow>(
+    `SELECT * FROM gear_lists WHERE id = $1 FOR UPDATE`,
+    [listId],
+  );
+  return r.rows[0] ?? null;
+}
+
+/** Serialize creates for one character within the transaction (5-list cap). */
+export async function lockCharacterForListCreate(db: Db, characterId: string): Promise<void> {
+  // hashtext → int4; advisory_xact_lock releases at COMMIT/ROLLBACK.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [characterId]);
 }
 
 export async function createList(
@@ -192,6 +208,7 @@ export async function createList(
     listId?: string;
   },
 ): Promise<{ list: GearListRow; created: boolean }> {
+  await lockCharacterForListCreate(db, args.characterId);
   const count = await countActiveLists(db, args.characterId);
   if (count >= MAX_LISTS_PER_CHARACTER) {
     const err = new Error(LIST_LIMIT_MSG);
@@ -207,6 +224,7 @@ export async function createList(
        id, guild_id, character_id, owner_user_id, name, version, visibility,
        updated_at, updated_source, updated_by
      ) VALUES ($1,$2,$3,$4,$5,1,$6, now(), $7, $8)
+     ON CONFLICT (id) DO NOTHING
      RETURNING *`,
     [
       listId,
@@ -219,7 +237,11 @@ export async function createList(
       args.actor.display_name,
     ],
   );
-  const list = ins.rows[0]!;
+  if (!ins.rows[0]) {
+    const existing = await getList(db, listId);
+    return { list: existing!, created: false };
+  }
+  const list = ins.rows[0];
   const outcome = await appendEvent(db, {
     guildId: args.guildId,
     listId,
@@ -258,22 +280,26 @@ export async function patchListMeta(
     actor: ActorInfo;
   },
 ): Promise<{ ok: true; list: GearListRow } | { ok: false; reason: 'version_mismatch'; list: GearListRow }> {
-  const currentVersion = Number(args.list.version);
-  if (currentVersion !== args.expectedVersion) {
+  const locked = await lockListForUpdate(db, args.list.id);
+  if (!locked || locked.deleted_at) {
     return { ok: false, reason: 'version_mismatch', list: args.list };
+  }
+  const currentVersion = Number(locked.version);
+  if (currentVersion !== args.expectedVersion) {
+    return { ok: false, reason: 'version_mismatch', list: locked };
   }
   const nextSeq = currentVersion + 1;
   let eventType: EventType | null = null;
   let payload: Record<string, unknown> = {};
-  let name = args.list.name;
-  let visibility = args.list.visibility;
+  let name = locked.name;
+  let visibility = locked.visibility;
 
-  if (args.name !== undefined && args.name !== args.list.name) {
+  if (args.name !== undefined && args.name !== locked.name) {
     eventType = 'GearListRenamed';
     payload = { name: args.name };
     name = args.name;
   }
-  if (args.visibility !== undefined && args.visibility !== args.list.visibility) {
+  if (args.visibility !== undefined && args.visibility !== locked.visibility) {
     // Rename and visibility change in one PATCH: emit rename first if both, else visibility as rename payload extension.
     // Prefer a single GearListRenamed-or-visibility event: use GearListRenamed when name changes,
     // otherwise encode visibility-only as GearListRenamed payload { visibility } is wrong.
@@ -287,26 +313,26 @@ export async function patchListMeta(
       payload = { ...payload, visibility: args.visibility };
     } else {
       eventType = 'GearListRenamed';
-      payload = { name: args.list.name, visibility: args.visibility };
+      payload = { name: locked.name, visibility: args.visibility };
     }
     visibility = args.visibility;
   }
   if (!eventType) {
-    return { ok: true, list: args.list };
+    return { ok: true, list: locked };
   }
 
   const outcome = await appendEvent(db, {
-    guildId: args.list.guild_id,
-    listId: args.list.id,
+    guildId: locked.guild_id,
+    listId: locked.id,
     seq: nextSeq,
     eventType,
     payload,
     source: args.source,
     actor: args.actor,
-    idempotencyKey: `meta:${args.list.id}:${nextSeq}:${args.actor.user_id}`,
+    idempotencyKey: `meta:${locked.id}:${nextSeq}:${args.actor.user_id}`,
   });
   if (outcome === 'duplicate') {
-    const fresh = await getList(db, args.list.id);
+    const fresh = await getList(db, locked.id);
     return { ok: false, reason: 'version_mismatch', list: fresh! };
   }
 
@@ -317,7 +343,7 @@ export async function patchListMeta(
      WHERE id = $1 AND version = $7
      RETURNING *`,
     [
-      args.list.id,
+      locked.id,
       name,
       visibility,
       nextSeq,
@@ -342,23 +368,27 @@ export async function deleteList(
     actor: ActorInfo;
   },
 ): Promise<{ ok: true; list: GearListRow } | { ok: false; reason: 'version_mismatch'; list: GearListRow }> {
-  const currentVersion = Number(args.list.version);
-  if (currentVersion !== args.expectedVersion) {
+  const locked = await lockListForUpdate(db, args.list.id);
+  if (!locked || locked.deleted_at) {
     return { ok: false, reason: 'version_mismatch', list: args.list };
+  }
+  const currentVersion = Number(locked.version);
+  if (currentVersion !== args.expectedVersion) {
+    return { ok: false, reason: 'version_mismatch', list: locked };
   }
   const nextSeq = currentVersion + 1;
   const outcome = await appendEvent(db, {
-    guildId: args.list.guild_id,
-    listId: args.list.id,
+    guildId: locked.guild_id,
+    listId: locked.id,
     seq: nextSeq,
     eventType: 'GearListDeleted',
     payload: {},
     source: args.source,
     actor: args.actor,
-    idempotencyKey: `delete:${args.list.id}:${nextSeq}`,
+    idempotencyKey: `delete:${locked.id}:${nextSeq}`,
   });
   if (outcome === 'duplicate') {
-    const fresh = await getList(db, args.list.id);
+    const fresh = await getList(db, locked.id);
     return { ok: false, reason: 'version_mismatch', list: fresh! };
   }
   const upd = await db.query<GearListRow>(
@@ -367,10 +397,10 @@ export async function deleteList(
          updated_at = now(), updated_source = $3, updated_by = $4
      WHERE id = $1 AND version = $5 AND deleted_at IS NULL
      RETURNING *`,
-    [args.list.id, nextSeq, args.source, args.actor.display_name, args.expectedVersion],
+    [locked.id, nextSeq, args.source, args.actor.display_name, args.expectedVersion],
   );
   if (!upd.rows[0]) {
-    const fresh = await getList(db, args.list.id);
+    const fresh = await getList(db, locked.id);
     return { ok: false, reason: 'version_mismatch', list: fresh! };
   }
   return { ok: true, list: upd.rows[0] };
@@ -417,12 +447,28 @@ export async function applyOps(
   const applied: string[] = [];
   const duplicates: string[] = [];
   const conflicts: GearConflict[] = [];
-  let list = args.list;
-  let version = Number(list.version);
+  // Source is always server-derived; never trust client op.source (web/system rejected at route).
+  const source = args.defaultSource;
   const foreverCheck = args.foreverCheck ?? (() => true);
 
+  const locked = await lockListForUpdate(db, args.list.id);
+  if (!locked || locked.deleted_at) {
+    return {
+      version: Number(args.list.version),
+      applied,
+      duplicates,
+      conflicts: args.ops.map((op) => ({
+        op_id: op.op_id,
+        reason: 'item_removed' as ConflictReason,
+        message: 'List not found or deleted.',
+      })),
+      ignored: args.ignored ?? [],
+    };
+  }
+  let list = locked;
+  let version = Number(list.version);
+
   for (const op of args.ops) {
-    const source: GearSource = op.source ?? args.defaultSource;
     const idem = idempotencyKeyForOp(op.op_id);
 
     // Idempotent retry
@@ -436,12 +482,7 @@ export async function applyOps(
     }
 
     if (!foreverCheck(op.item_id)) {
-      conflicts.push({
-        op_id: op.op_id,
-        reason: 'superseded_by_newer_edit',
-        message: 'item_not_forever',
-      });
-      // Record rejection
+      // Forever reject still consumes a seq + bumps list.version so later writes don't collide.
       version += 1;
       await appendEvent(db, {
         guildId: list.guild_id,
@@ -454,6 +495,13 @@ export async function applyOps(
         idempotencyKey: idem,
         occurredAt: op.client_ts ? new Date(op.client_ts) : null,
       });
+      conflicts.push({
+        op_id: op.op_id,
+        reason: 'item_not_forever',
+        message: 'item_not_forever',
+      });
+      await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+      list = (await getList(db, list.id))!;
       continue;
     }
 
@@ -497,10 +545,8 @@ export async function applyOps(
       }
     }
 
-    // Delete wins: if remove_item and there are pending competing edits, remove wins (we're applying remove now)
+    // Missing remove: single bucket (applied) — idempotent no-op with event for retry.
     if (op.type === 'remove_item' && !existing) {
-      duplicates.push(op.op_id); // nothing to remove; treat as ack if already gone after idem check
-      // Still record? Prefer no-op without event if never existed — but idempotency needs a row.
       version += 1;
       await appendEvent(db, {
         guildId: list.guild_id,
@@ -543,6 +589,7 @@ export async function applyOps(
         continue;
       }
       version += 1;
+      const note = op.note ?? null;
       await appendEvent(db, {
         guildId: list.guild_id,
         listId: list.id,
@@ -552,20 +599,23 @@ export async function applyOps(
           slot: op.slot,
           item_id: op.item_id,
           priority: op.priority,
-          note: op.note ?? null,
+          note,
         },
         source,
         actor: args.actor,
         idempotencyKey: idem,
         occurredAt: op.client_ts ? new Date(op.client_ts) : null,
       });
+      // Re-add resets obtained + note to match rebuildFromLog (GearItemAdded clears obtained).
       await db.query(
-        `INSERT INTO gear_list_items (guild_id, list_id, slot, item_id, priority, note, obtained)
-         VALUES ($1,$2,$3,$4,$5,$6,false)
+        `INSERT INTO gear_list_items (guild_id, list_id, slot, item_id, priority, note, obtained, obtained_at)
+         VALUES ($1,$2,$3,$4,$5,$6,false,NULL)
          ON CONFLICT (list_id, slot, item_id) DO UPDATE
            SET priority = EXCLUDED.priority,
-               note = COALESCE(EXCLUDED.note, gear_list_items.note)`,
-        [list.guild_id, list.id, op.slot, op.item_id, op.priority!, op.note ?? null],
+               note = EXCLUDED.note,
+               obtained = false,
+               obtained_at = NULL`,
+        [list.guild_id, list.id, op.slot, op.item_id, op.priority!, note],
       );
       await bumpListVersion(db, list.id, version, source, args.actor.display_name);
       applied.push(op.op_id);
@@ -703,7 +753,6 @@ export async function applyOps(
     }
   }
 
-  void itemKey;
   return {
     version: Number((await getList(db, args.list.id))!.version),
     applied,
