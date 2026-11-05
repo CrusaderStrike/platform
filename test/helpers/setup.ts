@@ -74,7 +74,8 @@ export async function startTestApp(opts?: {
   const url = await ensurePg();
   const pool = createPool(url);
   await pool.query(`
-    TRUNCATE upload_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs, guild_members, guilds,
+    TRUNCATE upload_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
+             gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
              item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
   `);
 

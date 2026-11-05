@@ -9,6 +9,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerProfileRoutes } from './routes/profile.js';
 import { registerGearRoutes } from './routes/gear.js';
 import { registerUploadRoutes } from './routes/uploads.js';
+import { registerGearListRoutes } from './routes/gear-lists.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -85,6 +86,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
   await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
   await registerUploadRoutes(app, { pool: opts.pool });
+  await registerGearListRoutes(app, { pool: opts.pool });
 
   return app;
 }
