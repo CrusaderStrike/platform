@@ -4,7 +4,7 @@ No secrets live in this file. Keys and tokens are in the operator vault or under
 ## Architecture
 - DigitalOcean droplet `crusaderstrike-platform-1` (id 616006981), region sfo3, size s-1vcpu-2gb (1 vCPU, 2 GB RAM, 50 GB disk, 2 GB swap), Ubuntu 24.04.5 LTS, public IP 24.199.127.192.
 - Stack in `/opt/crusaderstrike`:
-  - `docker-compose.yml`: postgres:16 (container `crusaderstrike-postgres-1`), bound to 127.0.0.1:5432 only. `initdb/` holds the init scripts.
+  - `docker-compose.yml` (droplet production file, not the repo's local-dev compose): postgres:16 (container `crusaderstrike-postgres-1`), bound to 127.0.0.1:5432 only. Mounts `./initdb:/docker-entrypoint-initdb.d:ro`. The idempotent roles script lives in this repo at `initdb/01-roles.sh` and is copied to `/opt/crusaderstrike/initdb/01-roles.sh` on the droplet.
   - `docker-compose.caddy.yml` and `caddy/Caddyfile`: caddy:2 (container `crusaderstrike-caddy-1`) on ports 80 and 443 (TCP and UDP/HTTP3). It handles TLS automatically.
 - Public endpoint: https://api.crusaderstrike.com/healthz should return 200.
 - What lives where: the website (static SPA) is on **GitHub Pages** from [CrusaderStrike/web](https://github.com/CrusaderStrike/web). The API and data are on this droplet. Never SSH to the droplet to change site content.
@@ -56,47 +56,143 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
 2. Checkout platform `main` onto the droplet at `/opt/crusaderstrike/platform`.
 3. Copy `ops/docker-compose.api.yml` to `/opt/crusaderstrike/docker-compose.api.yml`.
 4. **Postgres roles** (required before the API can migrate).
-   - Fresh Postgres volume: `initdb/01-roles.sh` runs on first init and creates `crusaderstrike_migrate` (LOGIN, BYPASSRLS, owns `crusaderstrike` DB + `public` schema) and `crusaderstrike_app` (LOGIN, NOBYPASSRLS, CONNECT/USAGE + default table grants). Passwords come from `MIGRATE_PASSWORD` / `APP_PASSWORD` in `/opt/crusaderstrike/.env` (alongside the `postgres` superuser password). **Do not put the superuser password in `api.env`.**
-   - Existing volume missing those roles: create them once by exporting passwords into the environment (never `echo`, `tee`, or durable argv) and re-running the init script:
-     ```
-     set -a
-     # source only the two role password lines from .env into the shell, or:
-     MIGRATE_PASSWORD=$(openssl rand -hex 24)   # if minting new
-     APP_PASSWORD=$(openssl rand -hex 24)
-     set +a
-     docker exec -i -e MIGRATE_PASSWORD -e APP_PASSWORD crusaderstrike-postgres-1        bash -s < /opt/crusaderstrike/initdb/01-roles.sh
-     # Append DATABASE_URL with the migrate password into api.env (step 5). Then:
-     unset MIGRATE_PASSWORD APP_PASSWORD
-     ```
-   - Confirm without secrets:  
-     `docker exec crusaderstrike-postgres-1 psql -U postgres -d crusaderstrike -tAc "SELECT rolname FROM pg_roles WHERE rolname LIKE 'crusaderstrike%'"`  
-     Expect `crusaderstrike_migrate` and `crusaderstrike_app`.
+
+   Source of truth for the script: repo `initdb/01-roles.sh` (idempotent). On the droplet:
+
+   ```
+   install -d -m 0755 /opt/crusaderstrike/initdb
+   cp -a /opt/crusaderstrike/platform/initdb/01-roles.sh /opt/crusaderstrike/initdb/01-roles.sh
+   chmod 0755 /opt/crusaderstrike/initdb/01-roles.sh
+   ```
+
+   Production `docker-compose.yml` must mount it for **fresh** volumes:
+
+   ```
+   volumes:
+     - pgdata:/var/lib/postgresql/data
+     - ./initdb:/docker-entrypoint-initdb.d:ro
+   ```
+
+   and the postgres service must receive `MIGRATE_PASSWORD` / `APP_PASSWORD` from `/opt/crusaderstrike/.env` (alongside `POSTGRES_PASSWORD` for the superuser). **Never put the superuser password in `api.env`.**
+
+   **Persist role passwords first (append-only; never re-mint if already present):**
+
+   ```
+   cd /opt/crusaderstrike
+   [ -e .env ] || install -m 0600 /dev/null .env
+   # Mint only when missing — re-minting would desync .env from the live role.
+   if ! grep -q '^MIGRATE_PASSWORD=' .env; then
+     printf 'MIGRATE_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+   fi
+   if ! grep -q '^APP_PASSWORD=' .env; then
+     printf 'APP_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+   fi
+   chmod 0600 .env
+   ```
+
+   **Load passwords into the environment without printing, then run the script:**
+
+   ```
+   set -a
+   # shellcheck disable=SC1091
+   source <(grep -E '^(MIGRATE_PASSWORD|APP_PASSWORD)=' .env)
+   set +a
+   docker exec -i -e MIGRATE_PASSWORD -e APP_PASSWORD \
+     crusaderstrike-postgres-1 bash -s < /opt/crusaderstrike/initdb/01-roles.sh
+   # Expect stdout: roles_ok crusaderstrike_migrate crusaderstrike_app
+   unset MIGRATE_PASSWORD APP_PASSWORD
+   ```
+
+   Fresh-volume path: the same script runs automatically via `/docker-entrypoint-initdb.d` on first Postgres init (passwords already in `.env` / compose env). Re-running the `docker exec` form on an existing DB is safe: it creates roles if missing, syncs passwords from `.env`, and re-applies ownership/grants.
+
+   Confirm without secrets:
+
+   ```
+   docker exec crusaderstrike-postgres-1 psql -U postgres -d crusaderstrike -tAc \
+     "SELECT rolname FROM pg_roles WHERE rolname LIKE 'crusaderstrike%'"
+   ```
+
+   Expect `crusaderstrike_migrate` and `crusaderstrike_app`.
+
 5. **`/opt/crusaderstrike/api.env` (root, mode 0600) — never overwrite.**
+
    - Create only if absent: `[ -e /opt/crusaderstrike/api.env ] || install -m 0600 /dev/null /opt/crusaderstrike/api.env`
    - After that, **only append (`>>`) or edit a single line in place**. Never `>` redirect, never `cp` / re-copy a template over a live file. Overwriting can rotate `SESSION_SECRET` or lose `TOKEN_ENC_KEY` (stored Blizzard tokens become unreadable).
    - Key rotation uses `TOKEN_ENC_KEY_PREVIOUS` (see TOKEN_ENC_KEY rotation) — do not replace `TOKEN_ENC_KEY` with `>`.
-   - Start from `.env.example` keys (append each line once):
-     - `NODE_ENV=production`, `PORT=3000`
-     - `PUBLIC_WEB_ORIGIN=https://crusaderstrike.com`, `PUBLIC_API_ORIGIN=https://api.crusaderstrike.com`
-     - `CORS_ORIGINS=https://crusaderstrike.com,https://www.crusaderstrike.com`
-     - `DATABASE_URL=postgres://crusaderstrike_migrate:<MIGRATE_PASSWORD>@postgres:5432/crusaderstrike`  
-       (migrate role needs `CREATE`. The migrate password also appears inside this URL; the Postgres **superuser** password stays only in `/opt/crusaderstrike/.env`. Split to `crusaderstrike_app` for serve once an entrypoint separates migrate from serve — open a follow-up ticket.)
-     - `SESSION_SECRET` — generate on the droplet (`openssl rand -hex 32`); never reuse compose examples.
-     - `TOKEN_ENC_KEY` — 64 hex chars (32 bytes). If the vault stores base64, convert **on the droplet inside the stdin pipeline** with `base64 -d | xxd -p -c 256` (no tee, no temp file, no argv). Never print.
-     - `BLIZZARD_MOCK=false`, `BLIZZARD_REGIONS=us`
-     - `BLIZZARD_CLIENT_ID` / `BLIZZARD_CLIENT_SECRET` from Drew's Battle.net client (vault `shared` → `blizzard_api:` tokens). Trim trailing commas/whitespace; a trailing comma breaks the OAuth `client_id` query param.
-     - `BLIZZARD_REDIRECT_URI=https://api.crusaderstrike.com/api/v1/auth/blizzard/callback`
+   - If you must snapshot before an in-place line edit: `cp -p api.env api.env.$(date -u +%Y%m%dT%H%M%SZ).bak && chmod 0600 api.env.*.bak`. Keep `.bak` copies **root-only mode 0600**, never ship them off-box unless the destination is encrypted, and **delete them once the change is verified**.
+   - Append each key only if absent (examples):
+
+     ```
+     cd /opt/crusaderstrike
+     append_kv() { # usage: append_kv FILE KEY VALUE  (VALUE must already be safe/trimmed)
+       local f="$1" k="$2" v="$3"
+       grep -q "^${k}=" "$f" 2>/dev/null || printf '%s=%s\n' "$k" "$v" >> "$f"
+     }
+     append_kv api.env NODE_ENV production
+     append_kv api.env PORT 3000
+     append_kv api.env PUBLIC_WEB_ORIGIN https://crusaderstrike.com
+     append_kv api.env PUBLIC_API_ORIGIN https://api.crusaderstrike.com
+     append_kv api.env CORS_ORIGINS https://crusaderstrike.com,https://www.crusaderstrike.com
+     append_kv api.env BLIZZARD_MOCK false
+     append_kv api.env BLIZZARD_REGIONS us
+     append_kv api.env BLIZZARD_REDIRECT_URI \
+       https://api.crusaderstrike.com/api/v1/auth/blizzard/callback
+
+     # DATABASE_URL — only if absent; load migrate password without printing:
+     if ! grep -q '^DATABASE_URL=' api.env; then
+       set -a
+       source <(grep -E '^MIGRATE_PASSWORD=' .env)
+       set +a
+       printf 'DATABASE_URL=postgres://crusaderstrike_migrate:%s@postgres:5432/crusaderstrike\n' \
+         "$MIGRATE_PASSWORD" >> api.env
+       unset MIGRATE_PASSWORD
+     fi
+
+     # SESSION_SECRET / TOKEN_ENC_KEY — mint once:
+     if ! grep -q '^SESSION_SECRET=' api.env; then
+       printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> api.env
+     fi
+     if ! grep -q '^TOKEN_ENC_KEY=' api.env; then
+       printf 'TOKEN_ENC_KEY=%s\n' "$(openssl rand -hex 32)" >> api.env
+     fi
+     chmod 0600 api.env
+     ```
+
+   - **Blizzard client env-loader hardening:** when copying vault `blizzard_api` values into `api.env`, trim whitespace and trailing commas before append (a trailing comma breaks OAuth — Location shows `client_id=…%2C`):
+
+     ```
+     # Given raw values in shell vars from the stdin vault pipe (never echo them):
+     trim_comma() { printf '%s' "$1" | tr -d '[:space:]' | sed 's/,*$//'; }
+     BID=$(trim_comma "$RAW_BLIZZARD_CLIENT_ID")
+     BSEC=$(trim_comma "$RAW_BLIZZARD_CLIENT_SECRET")
+     # length check without printing: client id must be 32 hex chars
+     [ ${#BID} -eq 32 ] || { echo "BLIZZARD_CLIENT_ID length != 32" >&2; exit 1; }
+     append_kv api.env BLIZZARD_CLIENT_ID "$BID"
+     append_kv api.env BLIZZARD_CLIENT_SECRET "$BSEC"
+     unset RAW_BLIZZARD_CLIENT_ID RAW_BLIZZARD_CLIENT_SECRET BID BSEC
+     ```
+
    Stream vault secrets **drewnix → box → droplet ssh stdin** only. Do not land secrets on the box disk or in argv; the droplet must never reach drewnix.
-6. **Pre-build / pre-`up` Postgres backup + pin current image** (required before every `build api` or `up -d api`, because boot runs `migrate()` and migrations are **forward-only** with no down scripts):
+
+6. **Pre-build / pre-`up` Postgres backup + pin current image** (required before every `build api` or `up -d api`, because boot runs `migrate()` and migrations are **forward-only** with no down scripts). Do this **before** `git pull` / checkout of a new SHA so the tag matches the image that is actually running:
+
    ```
    /usr/local/bin/crusaderstrike-backup
    mkdir -p /root
-   PLATFORM_SHA=$(git -C /opt/crusaderstrike/platform rev-parse HEAD)
-   # OLD_SHORT = last recorded HEAD before we append (for prev-<sha> tag):
-   OLD_SHORT=$(awk '/^platform_HEAD /{sha=$2} END{if(sha) print substr(sha,1,7)}' /root/image-digests.log 2>/dev/null || true)
+   # SHA the RUNNING image was built from = last post-deploy (else last) platform_HEAD.
+   # Do NOT use the SHA you are about to deploy.
+   RUNNING_SHORT=$(awk '
+     /^platform_HEAD / { sha=$2 }
+     /post-deploy/ { post=1; post_sha="" }
+     post && /^platform_HEAD / { post_sha=$2 }
+     END {
+       s = (post_sha != "" ? post_sha : sha)
+       if (s != "") print substr(s,1,7)
+     }
+   ' /root/image-digests.log 2>/dev/null || true)
    {
      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pre-build"
-     echo "platform_HEAD ${PLATFORM_SHA}"
+     echo -n "running_platform_HEAD_short "; echo "${RUNNING_SHORT:-(none)}"
      docker inspect --format 'api_image={{.Config.Image}} api_id={{.Image}}' crusaderstrike-api-1 2>/dev/null || echo "api_image=(none yet)"
      docker inspect --format 'postgres_image={{.Config.Image}} postgres_id={{.Image}}' crusaderstrike-postgres-1
      docker inspect --format 'caddy_image={{.Config.Image}} caddy_id={{.Image}}' crusaderstrike-caddy-1
@@ -104,12 +200,13 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    # Tag the currently running API image for rollback (skip if first deploy / no image yet):
    if docker image inspect crusaderstrike-api:local >/dev/null 2>&1; then
      docker tag crusaderstrike-api:local crusaderstrike-api:prev
-     if [ -n "$OLD_SHORT" ]; then
-       docker tag crusaderstrike-api:local "crusaderstrike-api:prev-${OLD_SHORT}"
+     if [ -n "$RUNNING_SHORT" ]; then
+       docker tag crusaderstrike-api:local "crusaderstrike-api:prev-${RUNNING_SHORT}"
      fi
    fi
+   # Now you may pull/checkout the new platform SHA and build.
    ```
-   Ordering: **backup → pin/tag → build → `up -d api`**. Never `up -d api` before the backup; that would apply pending migrations with no restore point. Migrations must stay **additive / backward-compatible** so `crusaderstrike-api:prev` / `prev-<sha>` can still run against the new schema. If a migration is not backward-compatible, rolling back code requires a Bot-approved restore from that backup (`docs/backups.md`) before serving old code.
+   Ordering: **backup → tag running image as `:prev` / `:prev-<running-shortsha>` → pull/checkout → build → `up -d api`**. Never `up -d api` before the backup; that would apply pending migrations with no restore point. Migrations must stay **additive / backward-compatible** so `crusaderstrike-api:prev` / `prev-<sha>` can still run against the new schema. If a migration is not backward-compatible, rolling back code requires a Bot-approved restore from that backup (`docs/backups.md`) before serving old code.
 7. Caddyfile: reverse-proxy `/healthz` and `/` to `api:3000`. **No CORS / `Access-Control-*` directives** (the app owns CORS; see Architecture). Back up first, but **do not reload Caddy yet** — start the API first so the proxy target is healthy:
    `cp -p caddy/Caddyfile caddy/Caddyfile.$(date -u +%Y%m%dT%H%M%SZ).bak`
 8. Build & start the API **before** pointing Caddy at it:
@@ -135,14 +232,23 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    ```
 11. Smoke:
    - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true}`
-   - `curl -sI https://api.crusaderstrike.com/api/v1/auth/blizzard/login` → 302 to `https://oauth.battle.net/authorize` with `client_id`, `redirect_uri`, `scope=wow.profile openid`, `state`, PKCE (`code_challenge` + `S256`). Compare `client_id` by length/hash only; reject a trailing comma in the Location.
+   - Login Location smoke (client_id must be 32 chars and must not contain a comma / `%2C`):
+     ```
+     loc=$(curl -sS -D - -o /dev/null https://api.crusaderstrike.com/api/v1/auth/blizzard/login \
+       | awk -F': ' 'tolower($1)=="location"{print $2}' | tr -d '\r')
+     LOC="$loc" python3 -c 'from urllib.parse import urlparse,parse_qs; import os; q=parse_qs(urlparse(os.environ["LOC"]).query); cid=q.get("client_id",[""])[0]; assert "oauth.battle.net" in os.environ["LOC"]; assert len(cid)==32 and "," not in cid and "%2C" not in cid, (len(cid), "," in cid); assert q.get("code_challenge_method",[""])[0]=="S256"; print("login_smoke_ok")'
+     ```
+     Expect `login_smoke_ok`. Do not print `client_id`.
    - `GET /api/v1/auth/session` with no cookie → **401**.
    - CORS single-header check (Architecture): `grep -ci '^access-control-allow-origin:'` → **1** for both apex and www Origins; `allow-credentials: true`; `expose-headers` includes `Retry-After`.
    - Preflight: `OPTIONS` with allowed Origin → 204 and the same single CORS set (includes credentials).
    - Cookie flags (after a real callback in a private window, or from captured `Set-Cookie`): `cs_session` must be `Secure; HttpOnly; SameSite=Lax` and must **not** set `Domain=` (host-only on `api.crusaderstrike.com`).
    - Throwaway mock refusal (must not reach Postgres / run migrations). Full command:
      ```
-     docker run --rm --network none --env-file api.env        -e BLIZZARD_MOCK=true -e NODE_ENV=production        --entrypoint node crusaderstrike-api:local        -e "require('./dist/config.js');"
+     docker run --rm --network none --env-file api.env \
+       -e BLIZZARD_MOCK=true -e NODE_ENV=production \
+       --entrypoint node crusaderstrike-api:local \
+       -e "require('./dist/config.js');"
      ```
      Expect non-zero exit / refuse production+mock. Do not boot `src/index.ts`. `--network none` ensures no DB even if config load were wrong.
    - 429 from `POST /api/v1/me/characters/refresh` (when rate-limited) includes `Retry-After` and CORS exposes it (header appears once).
@@ -176,28 +282,36 @@ curl -fsS https://api.crusaderstrike.com/healthz
 2. Migrations are forward-only (no down scripts). If the new migration is **not** backward-compatible with old code, do **not** only retag `:prev`. Stop writers, restore the pre-build dump through `docs/backups.md` (**Bot approval required**), then bring up the old image/SHA.
 
 ### Env file location
-`/opt/crusaderstrike/api.env` (root, 0600). **Never overwrite** — create with `install -m 0600` only when absent; afterward append (`>>`) or edit one line. Postgres **superuser** password stays in `/opt/crusaderstrike/.env` only; `api.env` may hold the migrate role password inside `DATABASE_URL`. Do not merge the files.
+`/opt/crusaderstrike/api.env` (root, 0600). **Never overwrite** — create with `install -m 0600` only when absent; afterward append (`>>`) or edit one line. Postgres **superuser** password stays in `/opt/crusaderstrike/.env` only; `api.env` may hold the migrate role password inside `DATABASE_URL`. Do not merge the files. Any `api.env.*.bak` snapshot must stay root-only `0600`, must not go to unencrypted offsite backup paths, and must be deleted once the change is verified.
 
 ## Deploy and restart (API droplet)
-Before pulling or rebuilding anything that can touch Postgres (including an API rebuild — `migrate()` runs on boot), take a fresh backup and append digests to `/root/image-digests.log`:
+Before pulling or rebuilding anything that can touch Postgres (including an API rebuild — `migrate()` runs on boot), take a fresh backup and tag the **currently running** API image (same rule as First deploy step 6 — use the last post-deploy `platform_HEAD`, not the SHA you are about to check out):
 ```
 /usr/local/bin/crusaderstrike-backup
+RUNNING_SHORT=$(awk '
+  /^platform_HEAD / { sha=$2 }
+  /post-deploy/ { post=1; post_sha="" }
+  post && /^platform_HEAD / { post_sha=$2 }
+  END {
+    s = (post_sha != "" ? post_sha : sha)
+    if (s != "") print substr(s,1,7)
+  }
+' /root/image-digests.log 2>/dev/null || true)
 {
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pre-change"
-  echo -n "platform_HEAD "; git -C /opt/crusaderstrike/platform rev-parse HEAD 2>/dev/null || true
+  echo -n "running_platform_HEAD_short "; echo "${RUNNING_SHORT:-(none)}"
   docker inspect --format '{{.Name}} image={{.Config.Image}} id={{.Image}}' crusaderstrike-postgres-1 crusaderstrike-caddy-1 crusaderstrike-api-1 2>/dev/null
 } >> /root/image-digests.log
-SHORT=$(awk '/^platform_HEAD /{sha=$2} END{print substr(sha,1,7)}' /root/image-digests.log)
 docker tag crusaderstrike-api:local crusaderstrike-api:prev 2>/dev/null || true
-[ -n "$SHORT" ] && docker tag crusaderstrike-api:local "crusaderstrike-api:prev-${SHORT}" 2>/dev/null || true
+[ -n "$RUNNING_SHORT" ] && docker tag crusaderstrike-api:local "crusaderstrike-api:prev-${RUNNING_SHORT}" 2>/dev/null || true
 ```
 ```
 cd /opt/crusaderstrike
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml ps
-docker compose -f docker-compose.yml -f docker-compose.caddy.yml pull
-docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
-docker compose ... restart caddy        # or postgres
-docker compose ... logs --tail=200 caddy
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml pull
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml restart caddy        # or postgres / api
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml logs --tail=200 caddy
 ```
 After any change, check that `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 and the CORS **single-header** check under Architecture still passes.
 
@@ -303,7 +417,7 @@ openssl rand -hex 32
 If you cannot keep the previous key (compromise, lost key), deploy with only the new `TOKEN_ENC_KEY`. Any stored token that is missing the `v1:` prefix or fails decrypt is cleared; the user gets `401 unauthenticated` and must sign in again. Logs include `user_id` and error code only — **never the key or token material**.
 
 ### Where the key is stored
-Operator vault and `/opt/crusaderstrike/.env` on the droplet (mode 0600). Who can rotate: Platform Dev via Bot-approved deploy.
+Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; never overwrite — append / rotate via `TOKEN_ENC_KEY_PREVIOUS`). Who can rotate: Platform Dev via Bot-approved deploy.
 
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.
