@@ -761,12 +761,13 @@ paths:
     get:
       tags: [gear]
       operationId: listCharacterGearLists
-      summary: Gear wishlists for a character (max 5)
+      summary: Gear wishlists for a character (max 20)
       description: |
-        Lists are **per character** (platform#17). Returns at most 5 active lists.
+        Lists are **per character** (platform#17). Returns at most 20 active lists.
         Owner sees private + guild-shared lists they own; other guild members only see
         lists with `visibility=guild` for characters they can access via guild context.
-        For slice 1, the caller must own the character (selected main/alt).
+        Caller must own the character and have it selected; unknown → **404**, owned but
+        not selected → **409** `character_not_displayed`.
       parameters:
         - name: character_id
           in: path
@@ -783,7 +784,7 @@ paths:
                 properties:
                   items:
                     type: array
-                    maxItems: 5
+                    maxItems: 20
                     items: { $ref: '#/components/schemas/GearList' }
               example:
                 items:
@@ -812,7 +813,17 @@ paths:
       summary: Create a named gear set / wishlist (emits GearListCreated + optional GearSlotSet)
       description: |
         Max **20** active lists per character. A 21st create returns **409** `list_limit_reached`.
-        Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
+        Default `visibility` is `private`. Emits `GearListCreated` (seq=1); optional create `slots`
+        also emit `GearSlotSet` per non-null slot.
+        Ownership is checked before the display/selection gate (unknown character → **404**;
+        owned but not selected → **409** `character_not_displayed`).
+        Slot/item validation on create `slots` uses **400** `validation_error` field details
+        (`slot: invalid_slot`, `item_id: item_not_in_slot` / `item_not_forever`). Invalid slots
+        are checked before the cap, so a 21st create with a bad slot returns **400** rather than
+        **409** `list_limit_reached`.
+        Level rules (`until_level_*`, `leveling_set_at_max_level`) apply on create and when
+        PATCH changes `type` or `until_level`. A non-number `until_level` sent with
+        `type: max_level` surfaces as `until_level_must_be_null`.
         Gear writes are rate-limited (~60 writes/min per user, fixed 60s window, no minimum interval); over limit → **429** with `Retry-After`. The limit is consumed **before** the write runs, so a later failure (for example 409 `version_mismatch`) still spends one token in the window.
       parameters:
         - name: character_id
@@ -965,7 +976,19 @@ paths:
     put:
       tags: [gear]
       operationId: putGearListSlot
-      summary: Set or clear one armory slot (If-Match; emits GearSlotSet or GearSlotCleared)
+      summary: Set or clear one armory slot (optional If-Match; emits GearSlotSet or GearSlotCleared)
+      description: |
+        Body `{ item_id: number|null }` sets or clears one equipment slot on an armory set.
+        CSRF + session + owner-only (non-owner → **404**). Character must be displayed → else
+        **409** `character_not_displayed`.
+
+        **If-Match is optional.** When present and mismatched → **409** `version_mismatch`.
+        When omitted, last write wins. A no-op set/clear (slot already holds the requested
+        `item_id`, or is already empty for `null`) returns **200** with the current state,
+        ETag, and `version` **without** a new event or version bump.
+
+        Slot/item validation uses **400** `validation_error` with field details:
+        `{ slot: invalid_slot }`, `{ item_id: item_not_in_slot }`, `{ item_id: item_not_forever }`.
       security: [{ session: [] }]
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
@@ -979,8 +1002,9 @@ paths:
           schema: { $ref: '#/components/schemas/GearSlot' }
         - name: If-Match
           in: header
-          required: true
+          required: false
           schema: { type: string, example: '"v3"' }
+          description: Optional optimistic concurrency. Omit for last-write-wins.
       requestBody:
         required: true
         content:
@@ -992,22 +1016,32 @@ paths:
                 item_id: { type: [integer, 'null'], minimum: 1 }
       responses:
         '200':
-          description: Slot updated
+          description: Slot updated (or no-op current state)
           headers:
             ETag: { schema: { type: string } }
           content:
             application/json:
               schema:
                 type: object
-                required: [slot, item_id, edited_at]
+                required: [slot, item_id, edited_at, version]
                 properties:
                   slot: { $ref: '#/components/schemas/GearSlot' }
                   item_id: { type: [integer, 'null'] }
                   edited_at: { type: string, format: date-time }
-        '400': { $ref: '#/components/responses/ValidationError' }
+                  version: { type: integer }
+        '400':
+          description: |
+            validation_error with field details (`slot: invalid_slot`,
+            `item_id: item_not_in_slot` / `item_not_forever`, bad `item_id` / If-Match).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationErrors' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '409':
+          description: version_mismatch (when If-Match present) or character_not_displayed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}/ops:

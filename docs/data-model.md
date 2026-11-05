@@ -118,3 +118,14 @@ Both send `characterId` **or** `realm` + `name` (realm normalized like uploads: 
 8. **Item search:** not in this PR. Plan: add `GET /api/v1/items/search?q=&slot=` when a Forever item catalog is available (follow-up after Blizzard Forever item data / local index). Until then web enters Forever item ids directly.
 9. **GearList** includes `updated_source` and `updated_at`.
 10. **Casing:** wishlist keeps **snake_case** `item_id` (and `list_id`, `base_version`, …) as already documented beside equipped gear's camelCase `itemId`. Equipped gear is unchanged.
+
+## Named armory gear sets (platform#40)
+
+- Create/list are character-scoped under `/api/v1/characters/{id}/gear-lists` (cap **20**).
+- Until #41, the display gate is main/alt selection → **409** `character_not_displayed`;
+  ownership **404** is checked first.
+- Per-slot PUT `/gear-lists/{id}/slots/{slot}`: **If-Match optional** (omit → last-write-wins).
+  No-op set/clear returns **200** with current state and does not bump `version`.
+  Slot/item errors are **400** `validation_error` with field details
+  (`slot: invalid_slot`, `item_id: item_not_in_slot` / `item_not_forever`).
+- Events: `GearListMetaChanged`, `GearSlotSet`, `GearSlotCleared`.

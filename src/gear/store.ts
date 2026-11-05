@@ -990,20 +990,22 @@ export async function rebuildFromLog(
 
 /**
  * Armory per-slot PUT: clear slot (itemId null) or replace with a single item at priority 1.
- * Emits GearSlotCleared or GearSlotSet; If-Match version checked by caller via expectedVersion.
+ * Emits GearSlotCleared or GearSlotSet.
+ * `expectedVersion` null = last-write-wins (no If-Match). No-op set/clear returns current
+ * state without a new event or version bump.
  */
 export async function setListSlot(
   db: Db,
   args: {
     list: GearListRow;
-    expectedVersion: number;
+    expectedVersion: number | null;
     slot: GearSlot;
     itemId: number | null;
     source: GearSource;
     actor: ActorInfo;
   },
 ): Promise<
-  | { ok: true; list: GearListRow }
+  | { ok: true; list: GearListRow; noop: boolean }
   | { ok: false; reason: 'version_mismatch'; list: GearListRow }
 > {
   const locked = await lockListForUpdate(db, args.list.id);
@@ -1011,9 +1013,22 @@ export async function setListSlot(
     return { ok: false, reason: 'version_mismatch', list: args.list };
   }
   const currentVersion = Number(locked.version);
-  if (currentVersion !== args.expectedVersion) {
+  if (args.expectedVersion != null && currentVersion !== args.expectedVersion) {
     return { ok: false, reason: 'version_mismatch', list: locked };
   }
+
+  const existing = await db.query<{ item_id: number }>(
+    `SELECT item_id FROM gear_list_items
+     WHERE list_id = $1 AND slot = $2 AND obtained = false
+     ORDER BY priority ASC, item_id ASC
+     LIMIT 1`,
+    [locked.id, args.slot],
+  );
+  const currentItemId = existing.rows[0]?.item_id ?? null;
+  if (currentItemId === args.itemId) {
+    return { ok: true, list: locked, noop: true };
+  }
+
   const nextSeq = currentVersion + 1;
   if (args.itemId == null) {
     const outcome = await appendEvent(db, {
@@ -1064,13 +1079,13 @@ export async function setListSlot(
      SET version = $2, updated_at = now(), updated_source = $3, updated_by = $4
      WHERE id = $1 AND version = $5
      RETURNING *`,
-    [locked.id, nextSeq, args.source, args.actor.display_name, args.expectedVersion],
+    [locked.id, nextSeq, args.source, args.actor.display_name, currentVersion],
   );
   if (!upd.rows[0]) {
     const fresh = await getList(db, args.list.id);
     return { ok: false, reason: 'version_mismatch', list: fresh! };
   }
-  return { ok: true, list: upd.rows[0] };
+  return { ok: true, list: upd.rows[0], noop: false };
 }
 
 export function slotsMapFromItems(items: GearItemRow[]): Record<GearSlot, number | null> {

@@ -88,6 +88,21 @@ function requireIfMatch(req: FastifyRequest): number {
   return expected;
 }
 
+/** Slot PUT: If-Match optional. Missing → null (last-write-wins). Present but bad → 400. */
+function optionalIfMatch(req: FastifyRequest): number | null {
+  const raw = req.headers['if-match'];
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
+    return null;
+  }
+  const expected = gear.parseIfMatchVersion(typeof raw === 'string' ? raw : raw[0]);
+  if (expected == null) {
+    throw new AppError(400, 'validation_error', 'Invalid If-Match.', {
+      'If-Match': 'Expected ETag like "v12".',
+    });
+  }
+  return expected;
+}
+
 async function requireGearWriteRate(
   pool: Pool,
   reply: FastifyReply,
@@ -103,19 +118,23 @@ async function requireGearWriteRate(
 
 
 async function assertForeverSlotItem(
-  pool: Pool,
+  db: Parameters<typeof foreverItems.catalogIsActive>[0],
   itemId: number,
   slot: GearSlot,
 ): Promise<void> {
-  const active = await foreverItems.catalogIsActive(pool);
+  const active = await foreverItems.catalogIsActive(db);
   if (!active) return;
-  const row = await foreverItems.getItem(pool, itemId);
+  const row = await foreverItems.getItem(db, itemId);
   if (!row) {
-    throw new AppError(400, 'item_not_forever', 'Item is not in the Forever catalog.');
+    throw new AppError(400, 'validation_error', 'Item is not in the Forever catalog.', {
+      item_id: 'item_not_forever',
+    });
   }
   const aliases = row.slot_aliases ?? [];
   if (row.slot !== slot && !aliases.includes(slot)) {
-    throw new AppError(400, 'item_not_in_slot', 'Item does not fit this equipment slot.');
+    throw new AppError(400, 'validation_error', 'Item does not fit this equipment slot.', {
+      item_id: 'item_not_in_slot',
+    });
   }
 }
 
@@ -129,7 +148,9 @@ function parseSlotsMap(raw: unknown): Record<string, number | null> | undefined 
   const out: Record<string, number | null> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (!(GEAR_SLOTS as readonly string[]).includes(k)) {
-      throw new AppError(400, 'invalid_slot', `Unknown slot: ${k}.`);
+      throw new AppError(400, 'validation_error', `Unknown slot: ${k}.`, {
+        slot: 'invalid_slot',
+      });
     }
     if (v === null) {
       out[k] = null;
@@ -155,10 +176,10 @@ export async function registerGearListRoutes(
     const s = requireSession(req);
     const characterId = (req.params as { character_id: string }).character_id;
     requireCharacterId(characterId);
-    const selection = await authStore.getSelection(pool, s.userId);
-    requireDisplayedCharacter(selection, characterId);
     const owned = await authStore.getCharacterForUser(pool, s.userId, characterId);
     if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
+    const selection = await authStore.getSelection(pool, s.userId);
+    requireDisplayedCharacter(selection, characterId);
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
     const client = await pool.connect();
@@ -192,10 +213,10 @@ export async function registerGearListRoutes(
     const characterId = (req.params as { character_id: string }).character_id;
     requireCharacterId(characterId);
     await requireGearWriteRate(pool, reply, s.userId);
-    const selection = await authStore.getSelection(pool, s.userId);
-    requireDisplayedCharacter(selection, characterId);
     const owned = await authStore.getCharacterForUser(pool, s.userId, characterId);
     if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
+    const selection = await authStore.getSelection(pool, s.userId);
+    requireDisplayedCharacter(selection, characterId);
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (typeof body.name !== 'string') {
@@ -502,11 +523,13 @@ export async function registerGearListRoutes(
     const params = req.params as { list_id: string; slot: string };
     requireUuid(params.list_id, 'list_id');
     if (!(GEAR_SLOTS as readonly string[]).includes(params.slot)) {
-      throw new AppError(400, 'invalid_slot', 'Unknown equipment slot.');
+      throw new AppError(400, 'validation_error', 'Unknown equipment slot.', {
+        slot: 'invalid_slot',
+      });
     }
     const slot = params.slot as GearSlot;
     await requireGearWriteRate(pool, reply, s.userId);
-    const expected = requireIfMatch(req);
+    const expected = optionalIfMatch(req);
     const body = (req.body ?? {}) as { item_id?: unknown };
     if (!('item_id' in body)) {
       throw new AppError(400, 'validation_error', 'Invalid slot update.', {
@@ -523,9 +546,6 @@ export async function registerGearListRoutes(
         item_id: 'Must be a positive integer or null.',
       });
     }
-    if (itemId != null) {
-      await assertForeverSlotItem(pool, itemId, slot);
-    }
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
     const battletag = await loadBattletag(pool, s.userId);
@@ -539,8 +559,13 @@ export async function registerGearListRoutes(
       if (!gear.canWriteList(list, s.userId)) {
         throw new AppError(404, 'not_found', 'List not found.');
       }
-      const selection = await authStore.getSelection(pool, s.userId);
+      const owned = await authStore.getCharacterForUser(client, s.userId, list.character_id);
+      if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
+      const selection = await authStore.getSelection(client, s.userId);
       requireDisplayedCharacter(selection, list.character_id);
+      if (itemId != null) {
+        await assertForeverSlotItem(client, itemId, slot);
+      }
       const result = await gear.setListSlot(client, {
         list,
         expectedVersion: expected,
@@ -566,6 +591,7 @@ export async function registerGearListRoutes(
         slot,
         item_id: itemId,
         edited_at: result.list.updated_at.toISOString(),
+        version: Number(result.list.version),
       };
     } catch (err) {
       await client.query('ROLLBACK');
@@ -706,10 +732,11 @@ export async function registerGearListRoutes(
     let owned: { id: string; character_name: string; realm: string | null } | null = null;
     if (envelope.characterId) {
       requireCharacterId(envelope.characterId);
+      owned = await authStore.getCharacterForUser(pool, s.userId, envelope.characterId);
+      if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
       if (!selected.has(envelope.characterId)) {
         throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
       }
-      owned = await authStore.getCharacterForUser(pool, s.userId, envelope.characterId);
     } else if (envelope.realm && envelope.name) {
       owned = await gear.findCharacterByRealmName(
         pool,
@@ -717,12 +744,13 @@ export async function registerGearListRoutes(
         envelope.realm,
         envelope.name,
       );
-      if (owned && !selected.has(owned.id)) {
+      if (!owned) throw new AppError(404, 'not_found', 'Character not found.');
+      if (!selected.has(owned.id)) {
         throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
       }
     }
     if (!owned) {
-      throw new AppError(409, 'character_not_displayed', 'Character is not in your display set.');
+      throw new AppError(404, 'not_found', 'Character not found.');
     }
 
     const guildId = await gear.resolveUploadGuildId(pool, s.userId, s.activeGuildId);
