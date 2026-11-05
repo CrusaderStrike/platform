@@ -11,14 +11,17 @@ async function clearCooldown(ctx: TestCtx) {
 
 async function selectMain(ctx: TestCtx, cookie: string, csrf: string) {
   const list = await ctx.app.inject({ method: 'GET', url: '/api/v1/me/characters', headers: { cookie } });
-  const body = list.json() as { characters: { id: string }[]; selection: { main_id: string } | null };
+  const body = list.json() as {
+    characters: { id: string; displayed: boolean }[];
+    selection: { displayed_character_ids: string[] } | null;
+  };
   const chosen = body.characters[0]!;
-  if (!body.selection || body.selection.main_id !== chosen.id) {
+  if (!chosen.displayed) {
     const sel = await ctx.app.inject({
-      method: 'PUT',
-      url: '/api/v1/me/characters/selection',
+      method: 'PATCH',
+      url: `/api/v1/me/characters/${chosen.id}`,
       headers: { cookie, 'x-csrf-token': csrf },
-      payload: { main_id: chosen.id, alt_ids: [] },
+      payload: { displayed: true },
     });
     expect(sel.statusCode).toBe(200);
   }
@@ -40,7 +43,7 @@ describe('gear lists (platform#17)', () => {
     await ctx.pool.query(`
       TRUNCATE public_api_rate_limits, upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
                gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
-               forever_items, forever_items_meta, item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
+               forever_items, forever_items_meta, item_icon_cache, character_gear, characters, sessions, oauth_states, users CASCADE
     `);
     await ctx.pool.query(
       `INSERT INTO forever_items_meta (id, build_id, item_count) VALUES (1, 'empty', 0) ON CONFLICT (id) DO NOTHING`,

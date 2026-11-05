@@ -42,13 +42,13 @@ export type CharacterRow = {
   level: number | null;
   game: 'wow_forever';
   stale: boolean;
+  displayed: boolean;
   updated_at: Date;
 };
 
 export type SelectionRow = {
   user_id: string;
-  main_id: string;
-  alt_ids: string[];
+  displayed_character_ids: string[];
   updated_at: Date;
 };
 
@@ -220,22 +220,10 @@ export async function replaceCharacters(
         ],
       );
     }
+    // Stale characters leave the display set (new chars keep displayed=false default).
     await client.query(
-      `DELETE FROM character_selections cs
-       USING characters c
-       WHERE cs.user_id = $1 AND cs.main_id = c.id AND c.stale = true`,
-      [userId],
-    );
-    await client.query(
-      `UPDATE character_selections cs SET
-         alt_ids = COALESCE((
-           SELECT array_agg(a) FROM unnest(cs.alt_ids) AS a
-           WHERE EXISTS (
-             SELECT 1 FROM characters c WHERE c.id = a AND c.user_id = cs.user_id AND c.stale = false
-           )
-         ), '{}'),
-         updated_at = now()
-       WHERE cs.user_id = $1`,
+      `UPDATE characters SET displayed = false, updated_at = now()
+       WHERE user_id = $1 AND stale = true AND displayed = true`,
       [userId],
     );
     await client.query('COMMIT');
@@ -262,28 +250,61 @@ export async function listCharacters(db: Db, userId: string): Promise<CharacterR
 }
 
 export async function getSelection(db: Db, userId: string): Promise<SelectionRow | null> {
-  const res = await db.query<SelectionRow>(
-    `SELECT user_id, main_id, alt_ids, updated_at FROM character_selections WHERE user_id = $1`,
+  const res = await db.query<{ id: string; updated_at: Date }>(
+    `SELECT id, updated_at FROM characters
+     WHERE user_id = $1 AND displayed = true AND stale = false
+     ORDER BY character_name, surname NULLS LAST`,
     [userId],
   );
-  return res.rows[0] ?? null;
+  if (!res.rows.length) return null;
+  const updatedAt = res.rows.reduce(
+    (max, row) => (row.updated_at > max ? row.updated_at : max),
+    res.rows[0]!.updated_at,
+  );
+  return {
+    user_id: userId,
+    displayed_character_ids: res.rows.map((r) => r.id),
+    updated_at: updatedAt,
+  };
 }
 
+/** Replace-all display set. Ids must already be validated as owned Forever live chars. */
 export async function setSelection(
   db: Db,
-  args: { userId: string; mainId: string; altIds: string[] },
+  args: { userId: string; displayedCharacterIds: string[] },
 ): Promise<SelectionRow> {
-  const res = await db.query<SelectionRow>(
-    `INSERT INTO character_selections (user_id, main_id, alt_ids, updated_at)
-     VALUES ($1, $2, $3, now())
-     ON CONFLICT (user_id) DO UPDATE SET
-       main_id = EXCLUDED.main_id,
-       alt_ids = EXCLUDED.alt_ids,
-       updated_at = now()
-     RETURNING user_id, main_id, alt_ids, updated_at`,
-    [args.userId, args.mainId, args.altIds],
+  const ids = args.displayedCharacterIds;
+  await db.query(
+    `UPDATE characters SET
+       displayed = (id = ANY($2::text[])),
+       updated_at = CASE
+         WHEN displayed IS DISTINCT FROM (id = ANY($2::text[])) THEN now()
+         ELSE updated_at
+       END
+     WHERE user_id = $1`,
+    [args.userId, ids],
   );
-  return res.rows[0]!;
+  const selection = await getSelection(db, args.userId);
+  if (selection) return selection;
+  return {
+    user_id: args.userId,
+    displayed_character_ids: [],
+    updated_at: new Date(),
+  };
+}
+
+/** Toggle one character's displayed flag (primary UI path). */
+export async function setCharacterDisplayed(
+  db: Db,
+  args: { userId: string; characterId: string; displayed: boolean },
+): Promise<CharacterRow | null> {
+  const res = await db.query<CharacterRow>(
+    `UPDATE characters SET displayed = $3, updated_at = now()
+     WHERE id = $1 AND user_id = $2
+     RETURNING *`,
+    [args.characterId, args.userId, args.displayed],
+  );
+  return res.rows[0] ?? null;
 }
 
 export async function getCharacterForUser(
@@ -403,14 +424,14 @@ export function characterToApi(c: CharacterRow) {
     level: c.level,
     game: 'wow_forever' as const,
     stale: c.stale,
+    displayed: c.displayed,
   };
 }
 
 export function selectionToApi(s: SelectionRow | null) {
   if (!s) return null;
   return {
-    main_id: s.main_id,
-    alt_ids: s.alt_ids ?? [],
+    displayed_character_ids: s.displayed_character_ids ?? [],
     updated_at: s.updated_at.toISOString(),
   };
 }

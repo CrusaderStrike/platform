@@ -49,10 +49,10 @@ export async function resolveUploadGuildId(
 }
 
 export function selectedCharacterIds(
-  selection: { main_id: string; alt_ids: string[] } | null,
+  selection: { displayed_character_ids: string[] } | null,
 ): Set<string> {
   if (!selection) return new Set();
-  return new Set([selection.main_id, ...(selection.alt_ids ?? [])]);
+  return new Set(selection.displayed_character_ids ?? []);
 }
 
 /**
