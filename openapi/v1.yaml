@@ -14,7 +14,16 @@ info:
     updated in the same transaction (platform#13). Ops merge at item level, and losing ops are
     reported as conflicts.
 
-    **CORS:** origins `https://crusaderstrike.com` and `https://www.crusaderstrike.com`.
+    **CORS:** origins `https://crusaderstrike.com` and `https://www.crusaderstrike.com`. Credentialed requests
+    get `Access-Control-Allow-Credentials: true`, with methods `GET, POST, PUT, PATCH, DELETE, OPTIONS` and
+    headers `Content-Type, X-CSRF-Token, If-Match, Authorization`. Signup endpoints allow no credentials.
+
+    **CSRF:** `GET /auth/session` returns `csrf_token`, which is bound to the session. Every state-changing
+    (non-GET) request authenticated with the `cs_session` cookie must send it as `X-CSRF-Token`, or it gets
+    `403` with code `csrf_failed`. Requests with a bearer `uploaderToken` are exempt.
+
+    **Body size:** JSON bodies are capped at 64 KB, except `/sync` (1 MB) and `/sync/savedvariables` (2 MB).
+    Larger bodies get `413`.
 
     **Rate limits:** every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.
     A 429 response includes `Retry-After`.
@@ -91,31 +100,46 @@ paths:
     get:
       tags: [auth]
       operationId: blizzardLogin
-      summary: Start Blizzard OAuth (placeholder, platform#11)
+      summary: Start Blizzard OAuth (platform#11)
+      description: |
+        Redirects to Battle.net authorize with server-side state and PKCE. Scope `wow.profile`.
+        The client secret never reaches the browser.
       security: []
       parameters:
         - name: return_to
           in: query
-          schema: { type: string, format: uri }
+          description: |
+            Relative same-site path only, for example `/signin.html`. It must start with a single `/`. Absolute URLs,
+            `//host` and backslashes are rejected with 400. Defaults to `/signin.html`.
+          schema: { type: string, pattern: '^/(?![/\\])[^\\]*$', maxLength: 512 }
       responses:
         '302':
-          description: Redirect to Battle.net authorize URL with state and PKCE.
+          description: Redirect to Battle.net authorize URL.
         '400': { $ref: '#/components/responses/ValidationError' }
   /auth/blizzard/callback:
     get:
       tags: [auth]
       operationId: blizzardCallback
-      summary: OAuth callback; sets session cookie (placeholder)
+      summary: OAuth callback; always redirects back to the site
+      description: |
+        This endpoint never returns JSON to the browser. It always responds with `302` to
+        `https://crusaderstrike.com{return_to}` plus an `auth` query parameter:
+        - `auth=ok` when the session is set (`Set-Cookie: cs_session; HttpOnly; Secure; SameSite=Lax`).
+        - `auth=cancelled` when Battle.net sent `error=access_denied` (the user cancelled; there is no `code`).
+        - `auth=error&reason=<code>` for any other failure. `reason` is one of `invalid_state`,
+          `upstream_unavailable` (Battle.net token or profile call failed), `oauth_error` or `internal_error`.
       security: []
       parameters:
-        - { name: code, in: query, required: true, schema: { type: string } }
-        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, description: 'Set by Battle.net on cancel/failure, e.g. access_denied.', schema: { type: string } }
+        - { name: error_description, in: query, schema: { type: string } }
       responses:
         '302':
-          description: Session established; redirect to return_to.
+          description: Redirect to the site with `auth=ok|cancelled|error`.
           headers:
+            Location: { schema: { type: string } }
             Set-Cookie: { schema: { type: string } }
-        '400': { $ref: '#/components/responses/ValidationError' }
   /auth/session:
     get:
       tags: [auth]
@@ -132,14 +156,17 @@ paths:
       tags: [auth]
       operationId: logout
       summary: Log out
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       responses:
         '204': { description: Logged out. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /auth/session/active-guild:
     put:
       tags: [auth]
       operationId: setActiveGuild
       summary: Switch active guild (must be a membership of the session)
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -156,6 +183,55 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Session' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /me/characters:
+    get:
+      tags: [auth]
+      operationId: listMyCharacters
+      summary: The signed-in user's WoW Forever characters and main/alt selection
+      description: |
+        Fetched from the Battle.net profile API using the **WoW Forever** profile namespace
+        `profile-forever-{region}` (for example `profile-forever-us`). Characters from any other game version are never
+        returned. `surname` and `realm` are optional because the Forever profile may omit them.
+      responses:
+        '200':
+          description: Character list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CharacterList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '502': { $ref: '#/components/responses/UpstreamUnavailable' }
+  /me/characters/selection:
+    put:
+      tags: [auth]
+      operationId: setMyCharacterSelection
+      summary: Set main and alts (full replace, idempotent)
+      description: |
+        `main_id` is required and must be one of the user's WoW Forever characters. `alt_ids` must also be the user's
+        characters, must not include `main_id`, has no duplicates and may be empty. `Member.is_main` is derived from this selection.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CharacterSelectionInput' }
+      responses:
+        '200':
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [selection]
+                properties:
+                  selection: { $ref: '#/components/schemas/CharacterSelection' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { $ref: '#/components/responses/UpstreamUnavailable' }
   /guild:
     get:
       tags: [guilds]
@@ -175,6 +251,7 @@ paths:
       operationId: updateGuild
       summary: Update guild profile (officer+; optimistic lock)
       parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
         - name: If-Match
           in: header
           required: true
@@ -202,6 +279,7 @@ paths:
       operationId: createGuild
       summary: Create guild (caller becomes owner)
       description: Exposes the open question from data-model.md (guild creation is currently admin-only).
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -243,11 +321,24 @@ paths:
       tags: [runs]
       operationId: uploadRun
       security: [{ session: [] }, { uploaderToken: [] }]
-      summary: Upload a run (idempotent on addon_run_id)
+      summary: Upload a run as the addon's JSON payload (schemaVersion 1)
       description: |
-        Idempotent on `(guild_id, addon_run_id)`. A first upload returns **201**. A retry returns **200**
-        with the original stored run unchanged. Payload differences are ignored, and corrections use
-        `/runs/{run_id}/corrections`.
+        The body is exactly the addon's run JSON (CrusaderStrike/addon `docs/run-schema.md`, camelCase).
+        The server stores the full JSON as `raw_payload`, and the `Run` response uses snake_case stored fields.
+        **Idempotency and upgrade rules** on `(guild_id, addon_run_id)`, where `addon_run_id = addonRunId`:
+        - No stored run: insert and return **201**.
+        - Stored run has `completed=false` and the new payload is a superset (same `instance.id` and `startedAt`,
+          with `bosses`/`deaths` containing the stored ones, and `endedAt`/`completed` only moving forward):
+          replace it, keep the `run_id`, store the new `raw_payload`, and return **200** with `updated: true`.
+        - The payload equals the stored one, or is a subset of it (an older export of the same run): return **200** with `updated: false`.
+        - Stored run has `completed=true` and the payload differs: return **409** `run_immutable`. Completed runs change
+          only through `POST /runs/{run_id}/corrections`.
+        - Stored run is unfinished but the payload is not a superset (for example a different `instance.id` or `startedAt`):
+          return **409** `run_payload_mismatch`.
+
+        Validation: `schemaVersion` above the server maximum (currently 1) returns **400** with
+        `errors.schemaVersion = "unsupported"`. `gameVersion` must be `forever`. Max body 64 KB (413).
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -255,19 +346,24 @@ paths:
             schema: { $ref: '#/components/schemas/RunUpload' }
       responses:
         '201':
-          description: Created.
+          description: New run created.
           headers:
             Location: { schema: { type: string } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Run' }
         '200':
-          description: Already ingested (retry).
+          description: |
+            Existing run. `updated: true` means an unfinished run was upgraded. `updated: false` means an identical
+            or older retry, and the stored run is returned unchanged.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Run' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
     get:
@@ -277,8 +373,9 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Cursor' }
         - { $ref: '#/components/parameters/Limit' }
-        - { name: dungeon, in: query, schema: { type: string } }
+        - { name: dungeon_id, in: query, description: instanceMapID, schema: { type: integer } }
         - { name: character, in: query, schema: { type: string } }
+        - { name: completed, in: query, schema: { type: boolean } }
         - { name: since, in: query, schema: { type: string, format: date-time } }
       responses:
         '200':
@@ -292,6 +389,60 @@ paths:
                     properties:
                       items: { type: array, items: { $ref: '#/components/schemas/Run' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /runs/import:
+    post:
+      tags: [runs]
+      operationId: importRunExport
+      security: [{ session: [] }, { uploaderToken: [] }]
+      summary: Import the addon's `CSRUN1:` export string (website paste box / companion)
+      description: |
+        The server decodes the string: it strips all whitespace, requires the `CSRUN1:` prefix, base64-decodes the rest
+        to UTF-8, parses it as JSON and validates it against `RunUpload`. It then ingests it exactly like `POST /runs`.
+        A bad prefix, bad base64 or bad JSON returns **400** with `errors.export` set to `bad_prefix`, `bad_base64` or `bad_json`.
+        The body can be JSON `{"export": "..."}` or the raw string as `text/plain`.
+        **Idempotency and upgrade rules** on `(guild_id, addon_run_id)`, where `addon_run_id = addonRunId`:
+        - No stored run: insert and return **201**.
+        - Stored run has `completed=false` and the new payload is a superset (same `instance.id` and `startedAt`,
+          with `bosses`/`deaths` containing the stored ones, and `endedAt`/`completed` only moving forward):
+          replace it, keep the `run_id`, store the new `raw_payload`, and return **200** with `updated: true`.
+        - The payload equals the stored one, or is a subset of it (an older export of the same run): return **200** with `updated: false`.
+        - Stored run has `completed=true` and the payload differs: return **409** `run_immutable`. Completed runs change
+          only through `POST /runs/{run_id}/corrections`.
+        - Stored run is unfinished but the payload is not a superset (for example a different `instance.id` or `startedAt`):
+          return **409** `run_payload_mismatch`.
+
+        Validation: `schemaVersion` above the server maximum (currently 1) returns **400** with
+        `errors.schemaVersion = "unsupported"`. `gameVersion` must be `forever`. Max body 64 KB (413).
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunImport' }
+          text/plain:
+            schema: { type: string, pattern: '^\\s*CSRUN1:', maxLength: 65536 }
+      responses:
+        '201':
+          description: New run created.
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '200':
+          description: |
+            Existing run. `updated: true` means an unfinished run was upgraded. `updated: false` means an identical
+            or older retry, and the stored run is returned unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /runs/{run_id}:
     get:
       tags: [runs]
@@ -311,7 +462,10 @@ paths:
       tags: [runs]
       operationId: correctRun
       summary: Append a correction or invalidation (officer+; who may correct is an open question for Drew)
-      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      description: This is the only way to change a completed run. The original `raw_payload` is kept.
+      parameters:
+        - { $ref: '#/components/parameters/RunId' }
+        - { $ref: '#/components/parameters/CsrfToken' }
       requestBody:
         required: true
         content:
@@ -331,12 +485,13 @@ paths:
       tags: [runs]
       operationId: getRankings
       summary: Guild rankings (materialized read model)
+      description: Only runs with `completed=true` that are not invalidated count toward rankings.
       parameters:
         - name: board
           in: query
           required: true
           schema: { type: string, enum: [fastest_clear, runs_completed] }
-        - { name: dungeon, in: query, schema: { type: string } }
+        - { name: dungeon_id, in: query, schema: { type: integer } }
         - { $ref: '#/components/parameters/Cursor' }
         - { $ref: '#/components/parameters/Limit' }
       responses:
@@ -379,6 +534,7 @@ paths:
       tags: [gear]
       operationId: createGearList
       summary: Create gear list (emits GearListCreated)
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -422,7 +578,9 @@ paths:
         last-writer-wins by server time, deletes beat reprioritizes, and a stale addon op loses to a web op.
         Losing ops are recorded as `GearOpRejected` and returned in `conflicts`.
         Returns 200 even when some ops conflict.
-      parameters: [{ $ref: '#/components/parameters/ListId' }]
+      parameters:
+        - { $ref: '#/components/parameters/ListId' }
+        - { $ref: '#/components/parameters/CsrfToken' }
       requestBody:
         required: true
         content:
@@ -483,6 +641,7 @@ paths:
         (idempotent per addon_run_id and op_id, with item-level merge and conflicts). It then returns an updated file
         for the user to save back and `/reload` or relog in game. The guild comes from the session.
       security: [{ session: [] }]
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -503,11 +662,8 @@ paths:
               schema: { type: string }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '413':
-          description: File too large.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
   /sync:
@@ -519,9 +675,12 @@ paths:
       description: |
         Optional helper-app path. Whether members may install a desktop app is an open question for Drew (#13 Q1).
         The default is `/sync/savedvariables`.
+        Each run is processed independently. A run that fails validation or conflicts is reported in its own
+        `SyncResponse.runs[]` entry and does not fail the batch. Max body 1 MB (413).
         Used for pull at game launch, push at game exit and a manual "Sync now".
         This one call combines the run upload semantics (idempotent per addon_run_id) and gear ops,
         then returns server events after each list's `since_version` for the companion to write into SavedVariables.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
         content:
@@ -535,6 +694,8 @@ paths:
               schema: { $ref: '#/components/schemas/SyncResponse' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 components:
@@ -553,6 +714,12 @@ components:
     RateLimit-Remaining: { schema: { type: integer } }
     RateLimit-Reset: { schema: { type: integer } }
   parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required on non-GET requests that use the `cs_session` cookie. Must equal `Session.csrf_token`. Not needed with a bearer `uploaderToken`. Mismatch returns 403 `csrf_failed`.
+      schema: { type: string }
     Cursor:
       name: cursor
       in: query
@@ -594,13 +761,30 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: Unexpected server error (code `internal_error`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: Body exceeds the size limit for this endpoint.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UpstreamUnavailable:
+      description: Battle.net API failed or timed out (code `upstream_unavailable`); retry later.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
     Unauthorized:
       description: No or invalid session.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
-      description: Not allowed for this role or guild.
+      description: Not allowed for this role or guild, or `csrf_failed`.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -610,7 +794,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Conflict:
-      description: Conflict.
+      description: Conflict (e.g. `run_immutable`, `run_payload_mismatch`, `slug_taken`).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -628,7 +812,9 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: { type: string, examples: [rate_limited, not_found, version_mismatch] }
+            code:
+              type: string
+              examples: [unauthenticated, csrf_failed, rate_limited, not_found, version_mismatch, run_immutable, run_payload_mismatch, payload_too_large, upstream_unavailable, internal_error]
             message: { type: string }
             request_id: { type: string }
     ValidationErrors:
@@ -672,9 +858,10 @@ components:
         next_cursor: { type: [string, 'null'] }
     Session:
       type: object
-      required: [battletag, memberships]
+      required: [battletag, memberships, csrf_token]
       properties:
         battletag: { type: string }
+        csrf_token: { type: string, description: Send as X-CSRF-Token on state-changing cookie requests. }
         active_guild_id: { type: [string, 'null'], format: uuid }
         memberships:
           type: array
@@ -696,7 +883,7 @@ components:
       properties:
         name: { type: string, maxLength: 48 }
         realm: { type: string, maxLength: 48 }
-        region: { type: string, enum: [us, eu] }
+        region: { $ref: '#/components/schemas/Region' }
         faction: { $ref: '#/components/schemas/Faction' }
     GuildUpdate:
       type: object
@@ -730,30 +917,76 @@ components:
         class: { type: string }
         role: { $ref: '#/components/schemas/MemberRole' }
         is_main: { type: boolean }
-    Participant:
+    WowClass:
+      type: string
+      description: Uppercase class token as the addon emits it.
+      enum: [WARRIOR, PALADIN, HUNTER, ROGUE, PRIEST, SHAMAN, MAGE, WARLOCK, DRUID]
+    AddonRunId:
+      type: string
+      maxLength: 128
+      pattern: '^[^|]+\\|[^|]+\\|[0-9]+\\|[0-9]+$'
+      description: '`{realm}|{character}|{startTimeUnix}|{instanceMapID}`, e.g. `CrusaderStrike|Snipy|1730000000|36`.'
+    PartyMember:
       type: object
-      required: [character_name]
+      required: [name, class]
       properties:
-        character_name: { type: string, maxLength: 48 }
+        name: { type: string, maxLength: 48 }
         realm: { type: string, maxLength: 48 }
-        class: { type: string }
-        role: { type: string, enum: [tank, healer, dps] }
-        member_id: { type: [string, 'null'], format: uuid }
+        class: { $ref: '#/components/schemas/WowClass' }
+        level: { type: integer, minimum: 1, maximum: 60 }
+        isPlayer: { type: boolean, description: True for the logging character. }
+    BossKill:
+      type: object
+      required: [npcId, name, killedAt]
+      properties:
+        npcId: { type: integer }
+        name: { type: string, maxLength: 64 }
+        killedAt: { type: integer, description: Unix seconds. }
+    Death:
+      type: object
+      required: [name, time]
+      properties:
+        name: { type: string, maxLength: 48 }
+        realm: { type: string, maxLength: 48 }
+        time: { type: integer, description: Unix seconds. }
+        source: { type: [string, 'null'], maxLength: 64 }
     RunUpload:
       type: object
-      required: [addon_run_id, dungeon, started_at, participants]
+      description: |
+        The addon run JSON, schemaVersion 1, exactly as emitted (keys are camelCase and sorted by the addon encoder).
+        Server mapping: addonRunId to addon_run_id, instance.id to dungeon_id, instance.name to dungeon,
+        instance.difficultyName to difficulty, startedAt/endedAt (unix seconds) to started_at/completed_at,
+        durationSec*1000 to duration_ms, completed to completed, party[] to participants, and the full JSON to raw_payload.
+        Unknown extra keys are accepted and kept in raw_payload.
+      required: [schemaVersion, gameVersion, idempotencyKey, addonRunId, realm, character, instance, startedAt, completed, status, party, bosses, deaths]
       properties:
-        addon_run_id: { type: string, maxLength: 64, description: 'Unique per guild; idempotency key.' }
-        dungeon: { type: string }
-        key_level: { type: [integer, 'null'] }
-        started_at: { type: string, format: date-time }
-        completed_at: { type: [string, 'null'], format: date-time }
-        duration_ms: { type: [integer, 'null'], minimum: 0 }
-        participants:
-          type: array
-          minItems: 1
-          maxItems: 40
-          items: { $ref: '#/components/schemas/Participant' }
+        schemaVersion: { type: integer, minimum: 1, description: 'Server max is 1; above that returns 400.' }
+        gameVersion: { const: forever }
+        idempotencyKey: { $ref: '#/components/schemas/AddonRunId' }
+        addonRunId: { $ref: '#/components/schemas/AddonRunId' }
+        realm: { type: string, maxLength: 48 }
+        character: { type: string, maxLength: 48 }
+        instance:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: integer, description: instanceMapID }
+            name: { type: string, maxLength: 64 }
+            difficulty: { type: [integer, 'null'] }
+            difficultyName: { type: [string, 'null'] }
+        startedAt: { type: integer, description: Unix seconds. }
+        endedAt: { type: [integer, 'null'] }
+        durationSec: { type: [integer, 'null'], minimum: 0 }
+        completed: { type: boolean, description: Final boss killed. }
+        status: { type: string, enum: [in_progress, closed, completed] }
+        party: { type: array, minItems: 1, maxItems: 40, items: { $ref: '#/components/schemas/PartyMember' } }
+        bosses: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/BossKill' } }
+        deaths: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/Death' } }
+    RunImport:
+      type: object
+      required: [export]
+      properties:
+        export: { type: string, maxLength: 65536, description: '`CSRUN1:<base64(utf8 json)>`.' }
     RunCorrection:
       type: object
       required: [kind, reason]
@@ -765,19 +998,85 @@ components:
           properties:
             duration_ms: { type: integer }
             completed_at: { type: string, format: date-time }
+            completed: { type: boolean }
+    Participant:
+      type: object
+      required: [character_name, class]
+      properties:
+        character_name: { type: string }
+        realm: { type: [string, 'null'] }
+        class: { $ref: '#/components/schemas/WowClass' }
+        level: { type: [integer, 'null'] }
+        is_logger: { type: boolean }
+        role: { type: [string, 'null'], enum: [tank, healer, dps, null], description: Not supplied by the addon; optional. }
+        member_id: { type: [string, 'null'], format: uuid }
     Run:
+      type: object
+      description: Stored run (snake_case), stored with RLS on guild_id.
+      required: [id, addon_run_id, schema_version, game_version, dungeon_id, dungeon, started_at, completed, participants, bosses, deaths]
+      properties:
+        id: { type: string, format: uuid }
+        addon_run_id: { $ref: '#/components/schemas/AddonRunId' }
+        schema_version: { type: integer }
+        game_version: { const: forever }
+        dungeon_id: { type: integer }
+        dungeon: { type: string }
+        difficulty: { type: [string, 'null'] }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        duration_ms: { type: [integer, 'null'] }
+        completed: { type: boolean }
+        status: { type: string, enum: [in_progress, closed, completed] }
+        participants: { type: array, items: { $ref: '#/components/schemas/Participant' } }
+        bosses: { type: array, items: { $ref: '#/components/schemas/BossKill' } }
+        deaths: { type: array, items: { $ref: '#/components/schemas/Death' } }
+        raw_payload: { type: object, description: Latest accepted addon JSON verbatim. }
+        invalidated: { type: boolean }
+        updated: { type: boolean, description: True when this request upgraded an unfinished run. }
+        uploaded_by: { type: string }
+        recorded_at: { type: string, format: date-time }
+        corrections: { type: array, items: { $ref: '#/components/schemas/RunCorrection' } }
+    Region:
+      type: string
+      enum: [us, eu]
+    Character:
+      type: object
+      description: WoW Forever character from Battle.net profile namespace `profile-forever-{region}`.
+      required: [id, character_name, game]
+      properties:
+        id: { type: string, description: Stable opaque id. }
+        character_name: { type: string }
+        surname: { type: [string, 'null'] }
+        realm: { type: [string, 'null'] }
+        region: { $ref: '#/components/schemas/Region' }
+        faction: { $ref: '#/components/schemas/Faction' }
+        class: { type: string }
+        race: { type: string }
+        level: { type: integer }
+        game: { const: wow_forever }
+    CharacterSelectionInput:
+      type: object
+      required: [main_id, alt_ids]
+      properties:
+        main_id: { type: string }
+        alt_ids: { type: array, uniqueItems: true, maxItems: 50, items: { type: string } }
+    CharacterSelection:
       allOf:
-        - { $ref: '#/components/schemas/RunUpload' }
+        - { $ref: '#/components/schemas/CharacterSelectionInput' }
         - type: object
-          required: [id]
+          required: [updated_at]
           properties:
-            id: { type: string, format: uuid }
-            invalidated: { type: boolean }
-            uploaded_by: { type: string }
-            recorded_at: { type: string, format: date-time }
-            corrections:
-              type: array
-              items: { $ref: '#/components/schemas/RunCorrection' }
+            updated_at: { type: string, format: date-time }
+    CharacterList:
+      type: object
+      required: [game, characters, selection]
+      properties:
+        game: { const: wow_forever }
+        characters: { type: array, items: { $ref: '#/components/schemas/Character' } }
+        selection:
+          oneOf:
+            - { $ref: '#/components/schemas/CharacterSelection' }
+            - { type: 'null' }
     RankingEntry:
       type: object
       properties:
@@ -786,11 +1085,15 @@ components:
         member_id: { type: [string, 'null'], format: uuid }
         value: { type: number }
         run_id: { type: [string, 'null'], format: uuid }
+    GearSlot:
+      type: string
+      description: WoW Forever equipment slots (shared by web and addon).
+      enum: [head, neck, shoulder, back, chest, shirt, tabard, wrist, hands, waist, legs, feet, finger1, finger2, trinket1, trinket2, main_hand, off_hand, ranged]
     GearItem:
       type: object
       required: [slot, item_id, priority]
       properties:
-        slot: { type: string }
+        slot: { $ref: '#/components/schemas/GearSlot' }
         item_id: { type: integer }
         priority: { type: integer, minimum: 1 }
         note: { type: string, maxLength: 200 }
@@ -811,7 +1114,7 @@ components:
       properties:
         op_id: { type: string, format: uuid, description: 'Idempotency key (guild_id, op:op_id).' }
         type: { type: string, enum: [add_item, remove_item, reprioritize_item, mark_obtained] }
-        slot: { type: string }
+        slot: { $ref: '#/components/schemas/GearSlot' }
         item_id: { type: integer }
         priority: { type: integer, minimum: 1 }
         note: { type: string, maxLength: 200 }
@@ -858,13 +1161,14 @@ components:
           items: { $ref: '#/components/schemas/RunUpload' }
         gear:
           type: array
+          maxItems: 50
           items:
             type: object
             required: [list_id, since_version]
             properties:
               list_id: { type: string, format: uuid }
               since_version: { type: integer, minimum: 0 }
-              ops: { type: array, items: { $ref: '#/components/schemas/GearOp' } }
+              ops: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/GearOp' } }
     SyncResponse:
       type: object
       required: [runs, gear]
@@ -873,10 +1177,13 @@ components:
           type: array
           items:
             type: object
+            required: [addon_run_id, status]
             properties:
               addon_run_id: { type: string }
-              run_id: { type: string, format: uuid }
+              status: { type: string, enum: [created, updated, unchanged, error] }
+              run_id: { type: [string, 'null'], format: uuid }
               created: { type: boolean }
+              error: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/ValidationErrors' }, { type: 'null' }] }
         gear:
           type: array
           items:
