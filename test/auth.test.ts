@@ -597,7 +597,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(second.statusCode).toBe(429);
     expect(second.headers['retry-after']).toBeTruthy();
-    expect(second.json()).toMatchObject({ error: { code: 'rate_limited' } });
+    expect(second.json()).toMatchObject({ error: { code: 'rate_limited', retryable: true } });
   });
 
   it('refresh upstream failure → 502 upstream_unavailable', async () => {
@@ -611,7 +611,9 @@ describe('Blizzard OAuth + characters (#11)', () => {
       headers: { cookie, 'x-csrf-token': csrf },
     });
     expect(refresh.statusCode).toBe(502);
-    expect(refresh.json()).toMatchObject({ error: { code: 'upstream_unavailable' } });
+    expect(refresh.json()).toMatchObject({
+      error: { code: 'upstream_unavailable', retryable: true },
+    });
   });
 
   it('PUT gear owner-only with camelCase itemId; GET returns it', async () => {
@@ -754,7 +756,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(bad.rowCount).toBe(0);
   });
 
-  it('refresh with non-v1 token → 401 and tokens cleared', async () => {
+  it('refresh with non-v1 token → 401 session_expired and tokens cleared', async () => {
     ctx = await startTestApp();
     const { cookie, csrf } = await signIn(ctx);
     await ctx.pool.query(`UPDATE users SET access_token = 'plaintext_access', refresh_token = 'plaintext_refresh'`);
@@ -765,7 +767,9 @@ describe('Blizzard OAuth + characters (#11)', () => {
       headers: { cookie, 'x-csrf-token': csrf },
     });
     expect(refresh.statusCode).toBe(401);
-    expect(refresh.json()).toMatchObject({ error: { code: 'unauthenticated' } });
+    expect(refresh.json()).toMatchObject({
+      error: { code: 'session_expired', retryable: false },
+    });
     const row = await ctx.pool.query<{ access_token: string | null }>(
       `SELECT access_token FROM users LIMIT 1`,
     );

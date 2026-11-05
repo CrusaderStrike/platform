@@ -2,6 +2,7 @@
 No secrets live in this file. Keys and tokens are in the operator vault or under /home/box/.config/do-platform/ on the agent box.
 
 ## Architecture
+- API error envelope / stable codes (gear-lists, selection, items): [`docs/api-errors.md`](./api-errors.md) (platform#51).
 - DigitalOcean droplet `crusaderstrike-platform-1` (id 616006981), region sfo3, size s-1vcpu-2gb (1 vCPU, 2 GB RAM, 50 GB disk, 2 GB swap), Ubuntu 24.04.5 LTS, public IP 24.199.127.192.
 - Stack in `/opt/crusaderstrike`:
   - `docker-compose.yml` (droplet production file, not the repo's local-dev compose): postgres:16 (container `crusaderstrike-postgres-1`), bound to 127.0.0.1:5432 only. Mounts `./initdb:/docker-entrypoint-initdb.d:ro`. The idempotent roles script lives in this repo at `initdb/01-roles.sh` and is copied to `/opt/crusaderstrike/initdb/01-roles.sh` on the droplet.
@@ -419,7 +420,7 @@ openssl rand -hex 32
 4. Future scheme bump: new writes can move to a `v2:` prefix while `v1:` continues to decrypt during a grace window; retire `v1:` / the previous key after the window.
 
 ### Force re-login fallback
-If you cannot keep the previous key (compromise, lost key), deploy with only the new `TOKEN_ENC_KEY`. Any stored token that is missing the `v1:` prefix or fails decrypt is cleared; the user gets `401 unauthenticated` and must sign in again. Logs include `user_id` and error code only — **never the key or token material**.
+If you cannot keep the previous key (compromise, lost key), deploy with only the new `TOKEN_ENC_KEY`. Any stored token that is missing the `v1:` prefix or fails decrypt is cleared; the user gets `401 session_expired` and must sign in again. Logs include `user_id` and error code only — **never the key or token material**.
 
 ### Where the key is stored
 Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; never overwrite — append / rotate via `TOKEN_ENC_KEY_PREVIOUS`). Who can rotate: Platform Dev via Bot-approved deploy.

@@ -36,8 +36,17 @@ export async function loadSession(pool: Pool, req: FastifyRequest): Promise<Requ
   };
 }
 
+/**
+ * Require a loaded session.
+ * - No cookie → `unauthenticated`
+ * - Cookie present but session missing/expired/revoked → `session_expired`
+ */
 export function requireSession(req: FastifyRequest): RequestSession {
   if (!req.csSession) {
+    const sid = req.cookies?.[SESSION_COOKIE];
+    if (sid) {
+      throw new AppError(401, 'session_expired', 'Session expired. Sign in again.');
+    }
     throw new AppError(401, 'unauthenticated', 'Sign in required.');
   }
   return req.csSession;
