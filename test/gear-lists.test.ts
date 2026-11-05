@@ -37,7 +37,7 @@ describe('gear lists (platform#17)', () => {
   beforeEach(async () => {
     // startTestApp truncates on each startTestApp call only once; re-truncate via helper path
     await ctx.pool.query(`
-      TRUNCATE upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
+      TRUNCATE public_api_rate_limits, upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
                gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
                item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
     `);
@@ -873,6 +873,84 @@ describe('gear lists (platform#17)', () => {
     const capped = createResults.filter((r) => r.statusCode === 409).length;
     expect(createdN + capped).toBeGreaterThan(0);
     expect((listed.json() as { items: unknown[] }).items).toHaveLength(5);
+  });
+
+
+  it('returns list_items_limit conflict reason at the items cap (platform#37 ride-along)', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'Cap list' },
+    });
+    expect(created.statusCode).toBe(201);
+    const listRow = created.json() as { id: string; version: number };
+    const row = await ctx.pool.query<{ guild_id: string }>(
+      `SELECT guild_id FROM gear_lists WHERE id = $1`,
+      [listRow.id],
+    );
+    const client = await ctx.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await gear.setTenant(client, row.rows[0]!.guild_id);
+      let list = await gear.getList(client, listRow.id);
+      // Fill to cap
+      const { MAX_ITEMS_PER_LIST } = await import('../src/gear/schema.js');
+      for (let i = 0; i < MAX_ITEMS_PER_LIST; i++) {
+        const opId = randomUUID();
+        const result = await gear.applyOps(client, {
+          list: list!,
+          ops: [
+            {
+              op_id: opId,
+              type: 'add_item',
+              slot: 'head',
+              item_id: 10_000 + i,
+              priority: 1,
+              base_version: Number(list!.version),
+            },
+          ],
+          defaultSource: 'web',
+          actor: { user_id: 'u', display_name: 'T#1' },
+          foreverCheck: () => true,
+        });
+        expect(result.applied).toEqual([opId]);
+        list = await gear.getList(client, listRow.id);
+      }
+      const overflowId = randomUUID();
+      const overflow = await gear.applyOps(client, {
+        list: list!,
+        ops: [
+          {
+            op_id: overflowId,
+            type: 'add_item',
+            slot: 'head',
+            item_id: 99_999,
+            priority: 1,
+            base_version: Number(list!.version),
+          },
+        ],
+        defaultSource: 'web',
+        actor: { user_id: 'u', display_name: 'T#1' },
+        foreverCheck: () => true,
+      });
+      expect(overflow.applied).toEqual([]);
+      expect(overflow.conflicts).toEqual([
+        expect.objectContaining({
+          op_id: overflowId,
+          reason: 'list_items_limit',
+          message: 'list_items_limit',
+        }),
+      ]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
 });

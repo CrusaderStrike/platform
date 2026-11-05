@@ -70,7 +70,7 @@ export type GearEventRow = {
 
 export type ActorInfo = { user_id: string; display_name: string };
 
-export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version' | 'item_not_forever';
+export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version' | 'item_not_forever' | 'list_items_limit';
 
 export type GearConflict = {
   op_id: string;
@@ -573,7 +573,7 @@ export async function applyOps(
         });
         conflicts.push({
           op_id: op.op_id,
-          reason: 'superseded_by_newer_edit',
+          reason: 'list_items_limit',
           message: 'list_items_limit',
         });
         await bumpListVersion(db, list.id, version, source, args.actor.display_name);
