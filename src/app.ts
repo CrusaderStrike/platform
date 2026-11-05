@@ -8,6 +8,7 @@ import { AppError, requestId } from './lib/errors.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerProfileRoutes } from './routes/profile.js';
 import { registerGearRoutes } from './routes/gear.js';
+import { registerUploadRoutes } from './routes/uploads.js';
 
 export type BuildAppOptions = {
   config: Config;
@@ -58,6 +59,12 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         error: { code: 'unsupported_media_type', message: 'Content-Type must be application/json.', request_id: req.id },
       });
     }
+    if ((err as { statusCode?: number; code?: string }).statusCode === 413 ||
+        (err as { code?: string }).code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      return reply.code(413).send({
+        error: { code: 'payload_too_large', message: 'Body exceeds size limit.', request_id: req.id },
+      });
+    }
     req.log.error(err);
     return reply.code(500).send({
       error: { code: 'internal_error', message: 'Something went wrong.', request_id: req.id },
@@ -77,6 +84,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   });
   await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
   await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
+  await registerUploadRoutes(app, { pool: opts.pool });
 
   return app;
 }
