@@ -1105,10 +1105,13 @@ paths:
         `GearOpRejected` and returned in `conflicts[]`.
 
         **Armory ops (platform#45):** `set_slot` replaces all items in a slot with one
-        Forever `item_id` (priority 1) and emits `GearSlotSet`; no-op (no version bump)
-        when the slot already holds only that item. `clear_slot` removes every item in
-        the slot and emits `GearSlotCleared`; no-op when already empty. Wishlist ops
-        (`add_item` / `remove_item` / …) stay valid for addon sync.
+        Forever `item_id` that fits the slot (priority 1) and emits `GearSlotSet`; no-op
+        (no version bump; op_id still recorded for dedupe) when the slot already holds
+        only that item. Wrong Forever slot → `item_not_in_slot`. `list_items_limit` applies
+        only when `set_slot` introduces a row into an **empty** slot (replace never grows
+        the list). `clear_slot` removes every item in the slot and emits `GearSlotCleared`;
+        no-op when already empty. Wishlist ops (`add_item` / `remove_item` / …) stay valid
+        for addon sync.
 
         **`base_version` (web):** the list `version` the client last observed (from GET,
         create, or the previous ops/sync response). Set every web op's `base_version` to
@@ -2177,6 +2180,8 @@ components:
           description: |
             `set_slot` / `clear_slot` are armory replace-in-slot ops (platform#45).
             Old wishlist ops remain valid for addon sync.
+            Soft-ignored on these two types: `priority`, `note`, `obtained`; also `item_id`
+            on `clear_slot` (clear has no item). Unknown keys remain soft-ignored.
         slot: { $ref: '#/components/schemas/GearSlot' }
         item_id:
           type: integer
@@ -2293,7 +2298,7 @@ components:
       required: [op_id, reason]
       properties:
         op_id: { type: string, format: uuid }
-        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version, item_not_forever, list_items_limit] }
+        reason: { type: string, enum: [superseded_by_newer_edit, item_removed, stale_base_version, item_not_forever, item_not_in_slot, list_items_limit] }
         winning_version: { type: integer }
         message: { type: string }
     GearOpsResult:

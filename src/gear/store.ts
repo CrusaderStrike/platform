@@ -77,7 +77,7 @@ export type GearEventRow = {
 
 export type ActorInfo = { user_id: string; display_name: string };
 
-export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version' | 'item_not_forever' | 'list_items_limit';
+export type ConflictReason = 'superseded_by_newer_edit' | 'item_removed' | 'stale_base_version' | 'item_not_forever' | 'item_not_in_slot' | 'list_items_limit';
 
 export type GearConflict = {
   op_id: string;
@@ -134,6 +134,56 @@ export async function getItems(db: Db, listId: string): Promise<GearItemRow[]> {
     [listId],
   );
   return r.rows;
+}
+
+/** Slot-scoped read for set_slot / clear_slot (avoids loading the whole list). */
+export async function getItemsInSlot(
+  db: Db,
+  listId: string,
+  slot: string,
+): Promise<GearItemRow[]> {
+  const r = await db.query<GearItemRow>(
+    `SELECT * FROM gear_list_items WHERE list_id = $1 AND slot = $2
+     ORDER BY priority ASC, item_id`,
+    [listId, slot],
+  );
+  return r.rows;
+}
+
+export async function countItems(db: Db, listId: string): Promise<number> {
+  const r = await db.query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM gear_list_items WHERE list_id = $1`,
+    [listId],
+  );
+  return Number(r.rows[0]?.n ?? 0);
+}
+
+/** Record a no-op op_id so retries stay deduped without bumping list.version. */
+async function recordNoopOpId(
+  db: Db,
+  guildId: string,
+  listId: string,
+  idempotencyKey: string,
+): Promise<'inserted' | 'duplicate'> {
+  const r = await db.query(
+    `INSERT INTO gear_op_noop_ids (guild_id, list_id, idempotency_key)
+     VALUES ($1,$2,$3)
+     ON CONFLICT DO NOTHING
+     RETURNING idempotency_key`,
+    [guildId, listId, idempotencyKey],
+  );
+  return r.rowCount ? 'inserted' : 'duplicate';
+}
+
+async function hasOpId(db: Db, guildId: string, idempotencyKey: string): Promise<boolean> {
+  const prior = await db.query(
+    `SELECT 1 FROM gear_list_events WHERE guild_id = $1 AND idempotency_key = $2
+     UNION ALL
+     SELECT 1 FROM gear_op_noop_ids WHERE guild_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [guildId, idempotencyKey],
+  );
+  return Boolean(prior.rowCount);
 }
 
 export function canViewList(list: GearListRow, viewerUserId: string): boolean {
@@ -519,6 +569,11 @@ export async function applyOps(
     ignored?: { op_id: string; keys: string[] }[];
     /** When true, Forever catalog check runs (stub: always pass until catalog exists). */
     foreverCheck?: (itemId: number) => boolean | Promise<boolean>;
+    /**
+     * Armory slot-fit check for set_slot (catalog active). Return false → item_not_in_slot.
+     * Missing / undefined = skip (catalog inactive or wishlist path).
+     */
+    fitsSlot?: (itemId: number, slot: string) => boolean | Promise<boolean>;
   },
 ): Promise<ApplyOpsResult> {
   const applied: string[] = [];
@@ -527,6 +582,7 @@ export async function applyOps(
   // Source is always server-derived; never trust client op.source (web/system rejected at route).
   const source = args.defaultSource;
   const foreverCheck = args.foreverCheck ?? (async () => true);
+  const fitsSlot = args.fitsSlot;
 
   const locked = await lockListForUpdate(db, args.list.id);
   if (!locked || locked.deleted_at) {
@@ -548,49 +604,50 @@ export async function applyOps(
   for (const op of args.ops) {
     const idem = idempotencyKeyForOp(op.op_id);
 
-    // Idempotent retry
-    const prior = await db.query(
-      `SELECT 1 FROM gear_list_events WHERE guild_id = $1 AND idempotency_key = $2`,
-      [list.guild_id, idem],
-    );
-    if (prior.rowCount) {
+    // Idempotent retry (events + no-op id markers that do not bump version)
+    if (await hasOpId(db, list.guild_id, idem)) {
       duplicates.push(op.op_id);
       continue;
     }
 
     // Allowlist gates ops that introduce an item reference (add_item / set_slot).
     // Mutations of rows already on the list must still work if absent from forever_items.
-    if (
-      (op.type === 'add_item' || op.type === 'set_slot') &&
-      !(await foreverCheck(op.item_id!))
-    ) {
-      // Forever reject still consumes a seq + bumps list.version so later writes don't collide.
-      version += 1;
-      await appendEvent(db, {
-        guildId: list.guild_id,
-        listId: list.id,
-        seq: version,
-        eventType: 'GearOpRejected',
-        payload: { op_id: op.op_id, reason: 'item_not_forever', item_id: op.item_id },
-        source,
-        actor: args.actor,
-        idempotencyKey: idem,
-        occurredAt: op.client_ts ? new Date(op.client_ts) : null,
-      });
-      conflicts.push({
-        op_id: op.op_id,
-        reason: 'item_not_forever',
-        message: 'item_not_forever',
-      });
-      await bumpListVersion(db, list.id, version, source, args.actor.display_name);
-      list = (await getList(db, list.id))!;
-      continue;
+    if (op.type === 'add_item' || op.type === 'set_slot') {
+      const itemId = op.item_id!;
+      let rejectReason: ConflictReason | null = null;
+      if (!(await foreverCheck(itemId))) {
+        rejectReason = 'item_not_forever';
+      } else if (op.type === 'set_slot' && fitsSlot && !(await fitsSlot(itemId, op.slot))) {
+        rejectReason = 'item_not_in_slot';
+      }
+      if (rejectReason) {
+        // Reject still consumes a seq + bumps list.version so later writes don't collide.
+        version += 1;
+        await appendEvent(db, {
+          guildId: list.guild_id,
+          listId: list.id,
+          seq: version,
+          eventType: 'GearOpRejected',
+          payload: { op_id: op.op_id, reason: rejectReason, item_id: itemId, slot: op.slot },
+          source,
+          actor: args.actor,
+          idempotencyKey: idem,
+          occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+        });
+        conflicts.push({
+          op_id: op.op_id,
+          reason: rejectReason,
+          message: rejectReason,
+        });
+        await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+        list = (await getList(db, list.id))!;
+        continue;
+      }
     }
 
     // --- set_slot / clear_slot (armory replace-in-slot; additive; old op types unchanged) ---
     if (op.type === 'set_slot' || op.type === 'clear_slot') {
-      const items = await getItems(db, list.id);
-      const inSlot = items.filter((i) => i.slot === op.slot);
+      const inSlot = await getItemsInSlot(db, list.id, op.slot);
       const lastTouch = await lastSlotTouchSeq(db, list.id, op.slot);
 
       if (lastTouch > op.base_version) {
@@ -625,7 +682,8 @@ export async function applyOps(
 
       if (op.type === 'clear_slot') {
         if (inSlot.length === 0) {
-          // Already empty — true no-op (no event / version bump). Retries are naturally idempotent.
+          // Already empty — no event / version bump; still record op_id for dedupe.
+          await recordNoopOpId(db, list.guild_id, list.id, idem);
           applied.push(op.op_id);
           continue;
         }
@@ -655,35 +713,40 @@ export async function applyOps(
       const itemId = op.item_id!;
       const unchanged = inSlot.length === 1 && inSlot[0]!.item_id === itemId;
       if (unchanged) {
+        await recordNoopOpId(db, list.guild_id, list.id, idem);
         applied.push(op.op_id);
         continue;
       }
-      if (inSlot.length === 0 && items.length >= MAX_ITEMS_PER_LIST) {
-        version += 1;
-        await appendEvent(db, {
-          guildId: list.guild_id,
-          listId: list.id,
-          seq: version,
-          eventType: 'GearOpRejected',
-          payload: {
+      // list_items_limit only when introducing a new row into an empty slot (replace never grows).
+      if (inSlot.length === 0) {
+        const total = await countItems(db, list.id);
+        if (total >= MAX_ITEMS_PER_LIST) {
+          version += 1;
+          await appendEvent(db, {
+            guildId: list.guild_id,
+            listId: list.id,
+            seq: version,
+            eventType: 'GearOpRejected',
+            payload: {
+              op_id: op.op_id,
+              reason: 'list_items_limit',
+              slot: op.slot,
+              item_id: itemId,
+            },
+            source,
+            actor: args.actor,
+            idempotencyKey: idem,
+            occurredAt: op.client_ts ? new Date(op.client_ts) : null,
+          });
+          conflicts.push({
             op_id: op.op_id,
             reason: 'list_items_limit',
-            slot: op.slot,
-            item_id: itemId,
-          },
-          source,
-          actor: args.actor,
-          idempotencyKey: idem,
-          occurredAt: op.client_ts ? new Date(op.client_ts) : null,
-        });
-        conflicts.push({
-          op_id: op.op_id,
-          reason: 'list_items_limit',
-          message: 'list_items_limit',
-        });
-        await bumpListVersion(db, list.id, version, source, args.actor.display_name);
-        list = (await getList(db, list.id))!;
-        continue;
+            message: 'list_items_limit',
+          });
+          await bumpListVersion(db, list.id, version, source, args.actor.display_name);
+          list = (await getList(db, list.id))!;
+          continue;
+        }
       }
       version += 1;
       await appendEvent(db, {
@@ -714,7 +777,12 @@ export async function applyOps(
 
     const items = await getItems(db, list.id);
     const existing = items.find((i) => i.slot === op.slot && i.item_id === op.item_id!);
-    const lastTouch = await lastItemTouchSeq(db, list.id, op.slot, op.item_id!);
+    // Slot watermark must win: clear_slot / set_slot wipe items without item_id in payload,
+    // so lastItemTouchSeq alone would miss them (addon sync + Option B race).
+    const lastTouch = Math.max(
+      await lastItemTouchSeq(db, list.id, op.slot, op.item_id!),
+      await lastSlotTouchSeq(db, list.id, op.slot),
+    );
 
     // Stale base_version when the same item was touched after client's base
     if (lastTouch > op.base_version) {
