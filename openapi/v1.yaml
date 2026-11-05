@@ -281,30 +281,43 @@ paths:
       operationId: refreshMyCharacters
       summary: Re-pull WoW Forever characters from Battle.net
       description: |
-        Calls the Blizzard profile API with namespace `profile-forever-{region}` using the stored
-        user token, upserts Forever characters, and marks missing ones stale (never hard-deletes).
-        If the current main goes stale, selection.main_id is cleared. Rate-limited per user.
-        Returns the same shape as `GET /me/characters`.
+        CSRF-protected. Re-fetches the Battle.net profile with namespace `profile-forever-{region}`
+        using the stored user token, upserts Forever characters, and marks missing ones stale
+        (never hard-deletes). If the current main goes stale, `selection.main_id` is cleared.
+        Returns **200** with the same body as `GET /me/characters`.
+        Blizzard failures return **502** `upstream_unavailable`.
+        At most one successful or attempted refresh per user per **60 seconds**; a faster call
+        returns **429** with `Retry-After` (seconds until the window opens).
+        Character main/alt selection remains `PUT /me/characters/selection` (no `/me/main`).
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       responses:
         '200':
-          description: Refreshed character list.
+          description: Refreshed character list (same shape as GET /me/characters).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CharacterList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '429':
+          description: |
+            Refresh called within the 60-second window. `Retry-After` is seconds until another
+            refresh is allowed. Body uses the shared `Error` shape (`rate_limited`).
+          headers:
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '502': { $ref: '#/components/responses/UpstreamUnavailable' }
   /characters/{character_id}/gear:
     get:
       tags: [gear]
       operationId: getCharacterGear
-      summary: Equipped gear for a character owned by the session
+      summary: Equipped gear for a character (guild-visible)
       description: |
         Per-character **equipped** gear (what the character is wearing), distinct from event-sourced
-        gear *wishlists* under `/gear-lists` (platform#17). The caller must own the character.
-        Items use snake_case field names. Empty slots are omitted.
+        gear *wishlists* under `/gear-lists` (platform#17). Readable by any signed-in member who can
+        see the character under guild visibility rules (owner always can). Empty slots are omitted.
+        Item objects use **camelCase** `itemId` (Web Dev mock contract).
       parameters:
         - name: character_id
           in: path
@@ -322,10 +335,11 @@ paths:
     put:
       tags: [gear]
       operationId: putCharacterGear
-      summary: Replace equipped gear for an owned character (full replace)
+      summary: Replace equipped gear (owner-only, CSRF-protected, full replace)
       description: |
-        Full replace of the equipped set. At most one item per slot. Unknown slots or duplicate
-        slots return 400. Ownership is required (403 otherwise). Wishlist edits stay on `/gear-lists`.
+        Owner-only. Full replace of the equipped set. At most one item per slot. Unknown slots or
+        duplicate slots return 400. Non-owners get 403. Wishlist edits stay on `/gear-lists`.
+        Body items use camelCase `itemId`.
       parameters:
         - { $ref: '#/components/parameters/CsrfToken' }
         - name: character_id
@@ -1166,7 +1180,7 @@ components:
         surname: { type: [string, 'null'] }
         realm: { type: [string, 'null'] }
         region: { $ref: '#/components/schemas/Region' }
-        faction: { $ref: '#/components/schemas/Faction' }
+        faction: { type: [string, 'null'], enum: [alliance, horde, null], description: 'Optional. Lowercase API values; Blizzard ALLIANCE/HORDE map here. Null when unknown.' }
         class: { type: string }
         race: { type: string }
         level: { type: integer }
@@ -1218,12 +1232,12 @@ components:
     EquippedItem:
       type: object
       description: |
-        One equipped item on a character. Field names are snake_case (`item_id`, `ilvl`).
-        Distinct from wishlist `GearItem` (which carries priority/obtained).
-      required: [slot, item_id]
+        One equipped item on a character. Uses camelCase `itemId` to match the Web Dev mock;
+        wishlist `GearItem` keeps snake_case `item_id` (platform#17).
+      required: [slot, itemId]
       properties:
         slot: { $ref: '#/components/schemas/GearSlot' }
-        item_id: { type: integer, minimum: 1 }
+        itemId: { type: integer, minimum: 1 }
         name: { type: [string, 'null'], maxLength: 128 }
         quality:
           type: [string, 'null']
