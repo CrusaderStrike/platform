@@ -2223,12 +2223,16 @@ describe('gear lists (platform#17)', () => {
       expect(guildSetting.rows[0]!.v).toBeNull();
 
       // Sanity: under FORCE RLS with no guild, the app role sees zero rows
-      // (and has no table DELETE — prune must go through SECURITY DEFINER).
+      // (and has no table DELETE — prune must go through SECURITY DEFINER; 013 REVOKE).
       const visible = await client.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM gear_op_noop_ids WHERE idempotency_key = $1`,
         [staleKey],
       );
       expect(Number(visible.rows[0]!.n)).toBe(0);
+      const canDelete = await client.query<{ v: boolean }>(
+        `SELECT has_table_privilege(current_user, 'public.gear_op_noop_ids', 'DELETE') AS v`,
+      );
+      expect(canDelete.rows[0]!.v).toBe(false);
       await expect(
         client.query(`DELETE FROM gear_op_noop_ids WHERE idempotency_key = $1`, [staleKey]),
       ).rejects.toThrow(/permission denied/i);

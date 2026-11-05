@@ -93,6 +93,8 @@ export async function startTestApp(opts?: {
   failUpstream?: boolean;
   emptyRoster?: boolean;
   regions?: string;
+  /** Optional BUILD_SHA for /healthz tests (platform#49). */
+  buildSha?: string;
 }): Promise<TestCtx> {
   const url = await ensurePg();
   const pool = createPool(url);
@@ -121,6 +123,7 @@ export async function startTestApp(opts?: {
     BLIZZARD_REDIRECT_URI: 'http://127.0.0.1/api/v1/auth/blizzard/callback',
     CORS_ORIGINS: 'https://crusaderstrike.com,https://www.crusaderstrike.com',
     COOKIE_SECURE: 'false',
+    ...(opts?.buildSha !== undefined ? { BUILD_SHA: opts.buildSha } : {}),
   });
 
   const blizzard = createBlizzardClient({

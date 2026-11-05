@@ -63,6 +63,11 @@ const envSchema = z.object({
    * Integer 1..3650. Default 30. See docs/runbook.md § gear_op_noop_ids retention.
    */
   GEAR_OP_NOOP_RETENTION_DAYS: z.string().optional(),
+  /**
+   * Short git sha baked at image build (Dockerfile ARG/ENV BUILD_SHA).
+   * Exposed only on /healthz — never log or return other build metadata.
+   */
+  BUILD_SHA: z.string().optional(),
 });
 
 export type Config = {
@@ -94,6 +99,8 @@ export type Config = {
   trustProxy: boolean | string[];
   /** Days to retain gear_op_noop_ids rows (validated 1..3650). */
   GEAR_OP_NOOP_RETENTION_DAYS: number;
+  /** Short deploy sha for /healthz ("unknown" if unset). */
+  BUILD_SHA: string;
 };
 
 function isProdEnv(nodeEnv: string, appEnv?: string): boolean {
@@ -221,5 +228,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure,
     trustProxy,
     GEAR_OP_NOOP_RETENTION_DAYS: gearOpNoopRetentionDays,
+    BUILD_SHA: (() => {
+      const raw = (v.BUILD_SHA ?? '').trim();
+      return raw.length > 0 ? raw : 'unknown';
+    })(),
   };
 }

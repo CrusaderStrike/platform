@@ -209,10 +209,11 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    Ordering: **backup → tag running image as `:prev` / `:prev-<running-shortsha>` → pull/checkout → build → `up -d api`**. Never `up -d api` before the backup; that would apply pending migrations with no restore point. Migrations must stay **additive / backward-compatible** so `crusaderstrike-api:prev` / `prev-<sha>` can still run against the new schema. If a migration is not backward-compatible, rolling back code requires a Bot-approved restore from that backup (`docs/backups.md`) before serving old code.
 7. Caddyfile: reverse-proxy `/healthz` and `/` to `api:3000`. **No CORS / `Access-Control-*` directives** (the app owns CORS; see Architecture). Back up first, but **do not reload Caddy yet** — start the API first so the proxy target is healthy:
    `cp -p caddy/Caddyfile caddy/Caddyfile.$(date -u +%Y%m%dT%H%M%SZ).bak`
-8. Build & start the API **before** pointing Caddy at it:
+8. Build & start the API **before** pointing Caddy at it. Bake the short git sha into the image (`Dockerfile` `ARG`/`ENV` `BUILD_SHA` → `/healthz.sha` only; no other build metadata):
    ```
    cd /opt/crusaderstrike
-   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+   BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD) \
+     docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
    docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
    # Wait until healthy:
    docker inspect -f '{{.State.Health.Status}}' crusaderstrike-api-1   # expect healthy
@@ -231,7 +232,7 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    } >> /root/image-digests.log
    ```
 11. Smoke:
-   - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true}`
+   - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true,"sha":"<short sha>"}` (sha from image `BUILD_SHA`; `"unknown"` if the image was built without the build-arg)
    - Login Location smoke (client_id must be 32 chars and must not contain a comma / `%2C`):
      ```
      loc=$(curl -sS -D - -o /dev/null https://api.crusaderstrike.com/api/v1/auth/blizzard/login \
@@ -260,7 +261,8 @@ Always run First deploy step 6 (backup + `/root/image-digests.log` pin + `docker
 ```
 cd /opt/crusaderstrike
 # step 6 (backup + pin + tag) goes HERE first
-docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+BUILD_SHA=$(git -C /opt/crusaderstrike/platform rev-parse --short HEAD) \
+  docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
 # wait healthy, then smoke /healthz + CORS single-header check
 curl -fsS https://api.crusaderstrike.com/healthz
@@ -397,7 +399,7 @@ Required before the first production API deploy (and every rotate):
 3. `BLIZZARD_REGIONS` set for the Forever regions you serve.
 4. `SESSION_SECRET` is unique and ≥32 bytes of entropy.
 5. Migrations applied (`npm run migrate` / image entrypoint).
-6. `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 after cutover.
+6. `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 `{"ok":true,"sha":"…"}` after cutover (sha matches the `BUILD_SHA` baked at `build api`).
 
 ## TOKEN_ENC_KEY rotation
 
@@ -431,7 +433,8 @@ Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; neve
 | **Rationale** | Addon `pending_ops` have **no TTL**; they stay in SavedVariables until the companion drains them. Default 30 days aligns with addon loot retention (≥30 days for un-uploaded drops). |
 | **After expiry** | A retry older than the window is **re-evaluated** (marker gone). Same slot state → applied as a fresh no-op (no version bump). If the list moved on, `base_version` yields `stale_base_version`. Neither case invents data; `base_version` remains the conflict guard. |
 | **Prune** | `SECURITY DEFINER` `public.prune_gear_op_noop_ids(days, limit)` owned by `crusaderstrike_migrate` (must already have **BYPASSRLS** from `initdb/01-roles.sh`; migration 012 does **not** `ALTER ROLE` and fails clearly if missing). Uses DB `now()` only (no caller timestamp). `SET search_path = pg_catalog, public, pg_temp` and schema-qualified `public.gear_op_noop_ids`. Hourly job: `pg_try_advisory_lock`, `FOR UPDATE SKIP LOCKED`, `pool.connect()` inside try/catch, destroy client if unlock fails, `stop()` awaits in-flight tick. Write-path prune **after COMMIT**, throttled once/minute/process. Index: `gear_op_noop_ids_recorded_at_idx` (012). |
-| **Ops note** | Rows also CASCADE when a list or guild is deleted. Zero-row prune passes log at debug. App role is **not** granted table `DELETE` (EXECUTE on the 2-arg function only). |
+| **Ops note** | Rows also CASCADE when a list or guild is deleted. Zero-row prune passes log at debug. App role is **not** granted table `DELETE` (EXECUTE on the 2-arg function only; migration 013 revokes any default-privilege DELETE). SQL `prune_gear_op_noop_ids` **silently clamps** `retention_days` to ≤3650 and `limit` to ≤100000 (raises only if `< 1`). |
+| **Dev DB note** | Migration files are checksum-immutable once applied. Dev databases that applied an **earlier draft** of `012_gear_op_noop_retention.sql` (e.g. the `p_now` / `ALTER ROLE` variants from open PR #48) will fail boot with a checksum mismatch — **reset that database** (drop/recreate the embedded or local volume and re-migrate) rather than editing 012. |
 
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.

@@ -1,10 +1,16 @@
 # Production API — joins existing crusaderstrike_default with postgres + caddy.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d
+# Pass short git sha at build so /healthz.sha matches the image (baked into ENV BUILD_SHA):
+#   BUILD_SHA=$(git -C ./platform rev-parse --short HEAD) \
+#     docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+# Do not set BUILD_SHA under environment: — that would override the image bake with host "unknown".
 services:
   api:
     build:
       context: ./platform
       dockerfile: Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     image: crusaderstrike-api:local
     restart: unless-stopped
     env_file:
