@@ -110,7 +110,9 @@ async function requireGearWriteRate(pool: Pool, userId: string, reply: { header:
   const rate = await gear.consumeGearWrite(pool, userId);
   if (!rate.ok) {
     reply.header('Retry-After', String(rate.retryAfterSec));
-    throw new AppError(429, 'rate_limited', 'Too many writes. Try again shortly.');
+    throw new AppError(429, 'rate_limited', 'Too many writes. Try again shortly.', undefined, {
+      retryAfterSec: rate.retryAfterSec,
+    });
   }
 }
 
@@ -209,14 +211,19 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
       const retryAfter = Math.ceil((last.getTime() + REFRESH_COOLDOWN_MS - now) / 1000);
       if (retryAfter > 0) {
         reply.header('Retry-After', String(retryAfter));
-        throw new AppError(429, 'rate_limited', 'Character refresh is rate-limited. Try again shortly.');
+        throw new AppError(429, 'rate_limited', 'Character refresh is rate-limited. Try again shortly.', undefined, {
+          retryAfterSec: retryAfter,
+        });
       }
     }
     await store.touchLastRefreshed(pool, s.userId);
 
     const user = await store.getUser(pool, s.userId);
     if (!user?.access_token) {
-      throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
+      // Signed-in row without a usable Blizzard token — client must re-auth.
+      await store.revokeSession(pool, s.sessionId);
+      clearSessionCookie(reply, config.cookieSecure);
+      throw new AppError(401, 'session_expired', 'Session expired. Sign in again.');
     }
     let access: string;
     try {
@@ -229,7 +236,7 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
         await store.clearUserTokens(pool, s.userId);
         await store.revokeSession(pool, s.sessionId);
         clearSessionCookie(reply, config.cookieSecure);
-        throw new AppError(401, 'unauthenticated', 'Sign in again.');
+        throw new AppError(401, 'session_expired', 'Session expired. Sign in again.');
       }
       req.log.error({ err }, 'token decrypt failed');
       throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
@@ -238,8 +245,23 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileD
       const pulled = await blizzard.fetchForeverCharactersAll(access);
       await store.replaceCharacters(pool, s.userId, pulled);
     } catch (err) {
+      const status = (err as { status?: number }).status;
+      // Blizzard rejected the token — treat as expired session, not a transient upstream blip.
+      if (status === 401 || status === 403) {
+        req.log.warn({ user_id: s.userId, status }, 'blizzard token unauthorized; forcing re-login');
+        await store.clearUserTokens(pool, s.userId);
+        await store.revokeSession(pool, s.sessionId);
+        clearSessionCookie(reply, config.cookieSecure);
+        throw new AppError(401, 'session_expired', 'Session expired. Sign in again.');
+      }
+      // Never leak upstream bodies/status text to clients.
       req.log.error({ err }, 'character refresh failed');
-      throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.');
+      const retryAfterRaw = (err as { retryAfterSec?: number }).retryAfterSec;
+      // Always 502 for a stable client mapping (catalog); 5xx/timeouts share this code.
+      throw new AppError(502, 'upstream_unavailable', 'Battle.net is not responding.', undefined, {
+        retryable: true,
+        retryAfterSec: typeof retryAfterRaw === 'number' && retryAfterRaw > 0 ? retryAfterRaw : undefined,
+      });
     }
     const chars = await store.listCharacters(pool, s.userId);
     const selection = await store.getSelection(pool, s.userId);

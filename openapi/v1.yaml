@@ -1411,6 +1411,25 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
 components:
+  x-error-codes:
+    description: |
+      Stable error codes for gear-lists, selection, and items (platform#51).
+      Full table: docs/api-errors.md. `retryable` is always present on the Error envelope.
+    unauthenticated: { http: 401, retryable: false }
+    session_expired: { http: 401, retryable: false }
+    csrf_failed: { http: 403, retryable: false }
+    validation_error: { http: 400, retryable: false }
+    not_found: { http: 404, retryable: false }
+    forbidden: { http: 403, retryable: false }
+    rate_limited: { http: 429, retryable: true }
+    version_mismatch: { http: 409, retryable: true }
+    character_not_displayed: { http: 409, retryable: false }
+    list_limit_reached: { http: 409, retryable: false }
+    precondition_required: { http: 428, retryable: false }
+    upstream_unavailable: { http: 502, retryable: true }
+    payload_too_large: { http: 413, retryable: false }
+    unsupported_media_type: { http: 415, retryable: false }
+    internal_error: { http: 500, retryable: true }
   securitySchemes:
     session:
       type: apiKey
@@ -1491,7 +1510,9 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Unauthorized:
-      description: No or invalid session.
+      description: |
+        No session (`unauthenticated`) or expired/revoked session / invalid Blizzard token
+        (`session_expired`). Both are HTTP 401; see docs/api-errors.md.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -1529,12 +1550,16 @@ components:
       properties:
         error:
           type: object
-          required: [code, message]
+          required: [code, message, retryable]
           properties:
             code:
               type: string
-              examples: [unauthenticated, csrf_failed, rate_limited, not_found, version_mismatch, list_limit_reached, item_not_forever, precondition_required, not_implemented, forbidden, run_immutable, run_payload_mismatch, payload_too_large, upstream_unavailable, internal_error]
-            message: { type: string }
+              description: Stable machine code (platform#51). Do not rename existing codes.
+              examples: [unauthenticated, session_expired, csrf_failed, rate_limited, not_found, version_mismatch, list_limit_reached, character_not_displayed, precondition_required, forbidden, payload_too_large, unsupported_media_type, upstream_unavailable, internal_error, validation_error]
+            message: { type: string, description: Safe human-readable text; never stacks/upstream bodies/secrets. }
+            retryable:
+              type: boolean
+              description: If true, a later retry may succeed (honor Retry-After when present).
             request_id: { type: string }
     ValidationErrors:
       type: object

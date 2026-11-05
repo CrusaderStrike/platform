@@ -112,7 +112,9 @@ async function requireGearWriteRate(
   const rate = await gear.consumeGearWrite(pool, userId);
   if (!rate.ok) {
     reply.header('Retry-After', String(rate.retryAfterSec));
-    throw new AppError(429, 'rate_limited', 'Gear write is rate-limited. Try again shortly.');
+    throw new AppError(429, 'rate_limited', 'Gear write is rate-limited. Try again shortly.', undefined, {
+      retryAfterSec: rate.retryAfterSec,
+    });
   }
 }
 
@@ -475,6 +477,7 @@ export async function registerGearListRoutes(
           error: {
             code: 'version_mismatch',
             message: 'List was modified; reload and retry.',
+            retryable: true,
             request_id: req.id,
           },
           current: {
@@ -533,6 +536,7 @@ export async function registerGearListRoutes(
           error: {
             code: 'version_mismatch',
             message: 'List was modified; reload and retry.',
+            retryable: true,
             request_id: req.id,
           },
           current: {
@@ -616,6 +620,7 @@ export async function registerGearListRoutes(
           error: {
             code: 'version_mismatch',
             message: 'List was modified; reload and retry.',
+            retryable: true,
             request_id: req.id,
           },
           current: { version: Number(result.list.version) },
@@ -811,7 +816,7 @@ export async function registerGearListRoutes(
             await client.query(`RELEASE SAVEPOINT ${sp}`);
             gearResults.push({
               list_id: entry.list_id,
-              error: { code: 'not_found', message: 'List not found for character.' },
+              error: { code: 'not_found', message: 'List not found for character.', retryable: false },
             });
             continue;
           }
@@ -819,7 +824,7 @@ export async function registerGearListRoutes(
             await client.query(`RELEASE SAVEPOINT ${sp}`);
             gearResults.push({
               list_id: entry.list_id,
-              error: { code: 'forbidden', message: 'Only the list owner can sync edits.' },
+              error: { code: 'forbidden', message: 'Only the list owner can sync edits.', retryable: false },
             });
             continue;
           }
@@ -863,6 +868,7 @@ export async function registerGearListRoutes(
             error: {
               code: 'internal_error',
               message: 'List sync failed.',
+              retryable: true,
             },
           });
         }

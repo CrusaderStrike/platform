@@ -28,7 +28,9 @@ async function enforceItemsRate(
   setRateHeaders(reply, rate);
   if (!rate.allowed) {
     reply.header('Retry-After', String(rate.retryAfterSec));
-    throw new AppError(429, 'rate_limited', 'Too many requests. Try again shortly.');
+    throw new AppError(429, 'rate_limited', 'Too many requests. Try again shortly.', undefined, {
+      retryAfterSec: rate.retryAfterSec,
+    });
   }
 }
 
