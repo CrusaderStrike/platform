@@ -1043,32 +1043,123 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /items:
+    get:
+      tags: [gear]
+      operationId: listItems
+      summary: Search Forever item catalog by slot
+      description: |
+        Public Forever item catalog for the armory picker (platform#39). Data imported from
+        Blizzard `static-forever-{region}` only — never classic/retail. `class` filters by
+        armor type (cloth|leather|mail|plate). `/items/search` is an alias of this handler.
+      parameters:
+        - name: slot
+          in: query
+          schema: { $ref: '#/components/schemas/GearSlot' }
+        - name: class
+          in: query
+          description: Armor type filter (alias of armor_type)
+          schema: { type: string, enum: [cloth, leather, mail, plate] }
+        - name: q
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 64 }
+        - name: min_item_level
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000 }
+        - name: max_required_level
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 60 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Matching Forever items
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ForeverItem' }
+                  next_cursor: { type: [string, 'null'] }
+        '304':
+          description: Not modified (If-None-Match)
+        '400': { $ref: '#/components/responses/ValidationError' }
+
   /items/search:
     get:
       tags: [gear]
       operationId: searchItems
-      summary: Forever item search (planned; not implemented in #17)
-      description: |
-        **Out of scope for platform#17.** Planned follow-up once a WoW Forever item catalog
-        exists: `GET /api/v1/items/search?q=&slot=` returning Forever-only items for the
-        add-item picker. Until then clients supply Forever `item_id` values directly.
-        This path is reserved and currently returns **501** `not_implemented`.
+      summary: Alias of GET /items (Forever catalog)
+      description: Same handler as `GET /api/v1/items` (platform#39).
       parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string, minLength: 1, maxLength: 64 }
         - name: slot
           in: query
           schema: { $ref: '#/components/schemas/GearSlot' }
+        - name: class
+          in: query
+          schema: { type: string, enum: [cloth, leather, mail, plate] }
+        - name: q
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 64 }
+        - name: min_item_level
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: max_required_level
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 60 }
+        - name: cursor
+          in: query
+          schema: { type: string }
       responses:
-        '501':
-          description: Not implemented until Forever item catalog lands.
+        '200':
+          description: Matching Forever items
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-              example:
-                error: { code: not_implemented, message: Forever item search is not available yet., request_id: req_1 }
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ForeverItem' }
+                  next_cursor: { type: [string, 'null'] }
+        '304':
+          description: Not modified
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /items/{item_id}:
+    get:
+      tags: [gear]
+      operationId: getItem
+      summary: Forever item by id
+      parameters:
+        - name: item_id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Forever item
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ForeverItem' }
+        '304':
+          description: Not modified
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /sync/savedvariables:
     post:
@@ -1803,6 +1894,32 @@ components:
         member_id: { type: [string, 'null'], format: uuid }
         value: { type: number }
         run_id: { type: [string, 'null'], format: uuid }
+    ForeverItem:
+      type: object
+      required: [item_id, name, slot, inventory_type, quality, item_level, required_level, armor_type, stats, icon_url, source, verified]
+      properties:
+        item_id: { type: integer, minimum: 1 }
+        name: { type: string }
+        slot: { $ref: '#/components/schemas/GearSlot' }
+        inventory_type: { type: string, description: Blizzard inventory_type.type }
+        quality: { type: string }
+        item_level: { type: integer }
+        required_level: { type: integer }
+        armor_type: { type: [string, 'null'], enum: [cloth, leather, mail, plate, null] }
+        stats:
+          type: [array, 'null']
+          items:
+            type: object
+            required: [type, value]
+            properties:
+              type: { type: string }
+              value: { type: number }
+        icon_url:
+          type: [string, 'null']
+          description: HTTPS render.worldofwarcraft.com URL or null
+        source: { type: string, enum: [blizzard_forever] }
+        verified: { type: boolean, enum: [true] }
+
     GearSlot:
       type: string
       description: WoW Forever equipment slots (shared by web and addon).

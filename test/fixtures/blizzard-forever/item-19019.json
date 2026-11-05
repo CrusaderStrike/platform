@@ -1,0 +1,16 @@
+{
+  "id": 19019,
+  "name": "Thunderfury, Blessed Blade of the Windseeker",
+  "quality": { "type": "LEGENDARY", "name": "Legendary" },
+  "level": 80,
+  "required_level": 60,
+  "inventory_type": { "type": "WEAPON", "name": "One-Hand" },
+  "item_class": { "id": 2, "name": "Weapon" },
+  "item_subclass": { "id": 7, "name": "Sword" },
+  "preview_item": {
+    "stats": [
+      { "type": { "type": "AGILITY", "name": "Agility" }, "value": 44 },
+      { "type": { "type": "STAMINA", "name": "Stamina" }, "value": 22 }
+    ]
+  }
+}

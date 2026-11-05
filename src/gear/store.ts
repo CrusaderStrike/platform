@@ -433,7 +433,7 @@ export async function applyOps(
     actor: ActorInfo;
     ignored?: { op_id: string; keys: string[] }[];
     /** When true, Forever catalog check runs (stub: always pass until catalog exists). */
-    foreverCheck?: (itemId: number) => boolean;
+    foreverCheck?: (itemId: number) => boolean | Promise<boolean>;
   },
 ): Promise<ApplyOpsResult> {
   const applied: string[] = [];
@@ -441,7 +441,7 @@ export async function applyOps(
   const conflicts: GearConflict[] = [];
   // Source is always server-derived; never trust client op.source (web/system rejected at route).
   const source = args.defaultSource;
-  const foreverCheck = args.foreverCheck ?? (() => true);
+  const foreverCheck = args.foreverCheck ?? (async () => true);
 
   const locked = await lockListForUpdate(db, args.list.id);
   if (!locked || locked.deleted_at) {
@@ -473,7 +473,7 @@ export async function applyOps(
       continue;
     }
 
-    if (!foreverCheck(op.item_id)) {
+    if (!(await foreverCheck(op.item_id))) {
       // Forever reject still consumes a seq + bumps list.version so later writes don't collide.
       version += 1;
       await appendEvent(db, {

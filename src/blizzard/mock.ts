@@ -68,6 +68,80 @@ const FIXTURE_CHARS = [
   },
 ];
 
+const FIXTURE_FOREVER_ITEMS = [
+  {
+    id: 19019,
+    name: 'Thunderfury, Blessed Blade of the Windseeker',
+    inventory_type: { type: 'WEAPON', name: 'One-Hand' },
+    quality: { type: 'LEGENDARY', name: 'Legendary' },
+    level: 80,
+    required_level: 60,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 7, name: 'Sword' },
+    preview_item: {
+      stats: [
+        { type: { type: 'AGILITY', name: 'Agility' }, value: 44 },
+        { type: { type: 'STAMINA', name: 'Stamina' }, value: 22 },
+      ],
+    },
+    icon: 'inv_sword_39',
+  },
+  {
+    id: 16846,
+    name: "Giantstalker's Helmet",
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 66,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 3, name: 'Mail' },
+    preview_item: {
+      stats: [{ type: { type: 'AGILITY', name: 'Agility' }, value: 23 }],
+    },
+    icon: 'inv_helmet_05',
+  },
+  {
+    id: 16914,
+    name: 'Netherwind Crown',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 76,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 1, name: 'Cloth' },
+    preview_item: {
+      stats: [{ type: { type: 'INTELLECT', name: 'Intellect' }, value: 30 }],
+    },
+    icon: 'inv_crown_01',
+  },
+  {
+    id: 18813,
+    name: 'Ring of Binding',
+    inventory_type: { type: 'FINGER', name: 'Finger' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 73,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 0, name: 'Miscellaneous' },
+    preview_item: { stats: [] },
+    icon: 'inv_jewelry_ring_13',
+  },
+  {
+    id: 12345,
+    name: 'Test Helm of Emberfall',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 40,
+    required_level: 35,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 4, name: 'Plate' },
+    preview_item: {
+      stats: [{ type: { type: 'STRENGTH', name: 'Strength' }, value: 12 }],
+    },
+    icon: 'inv_helmet_03',
+  },
+];
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -131,6 +205,16 @@ export async function startMockBlizzard(
         }
         const raw = await readBody(req);
         const params = new URLSearchParams(raw);
+        if (params.get('grant_type') === 'client_credentials') {
+          const access = `access_cc_${randomBytes(16).toString('hex')}`;
+          tokens.set(access, { access });
+          send(res, 200, {
+            access_token: access,
+            token_type: 'Bearer',
+            expires_in: 3600,
+          });
+          return;
+        }
         const code = params.get('code') ?? '';
         const verifier = params.get('code_verifier') ?? '';
         const entry = codes.get(code);
@@ -219,6 +303,83 @@ export async function startMockBlizzard(
       }
 
 
+
+      if (req.method === 'GET' && url.pathname.startsWith('/data/wow/item/') && !url.pathname.includes('/media/')) {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic')) {
+          send(res, 403, { error: 'classic_namespace_rejected' });
+          return;
+        }
+        if (!ns.startsWith('static-forever-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        const idStr = url.pathname.split('/').pop() ?? '';
+        const itemId = Number(idStr);
+        const item = FIXTURE_FOREVER_ITEMS.find((i) => i.id === itemId);
+        if (!item) {
+          send(res, 404, { code: 404 });
+          return;
+        }
+        const { icon, ...body } = item;
+        void icon;
+        send(res, 200, body);
+        return;
+      }
+
+      if (req.method === 'GET' && url.pathname === '/data/wow/search/item') {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic') || !ns.startsWith('static-forever-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        const inv = (url.searchParams.get('inventory_type.type') ?? '').toUpperCase();
+        const page = Number(url.searchParams.get('_page') ?? '1') || 1;
+        const pageSize = Number(url.searchParams.get('_pageSize') ?? '100') || 100;
+        let matched = FIXTURE_FOREVER_ITEMS;
+        if (inv) {
+          matched = matched.filter((i) => i.inventory_type.type === inv);
+        }
+        const start = (page - 1) * pageSize;
+        const slice = matched.slice(start, start + pageSize);
+        send(res, 200, {
+          page,
+          pageSize,
+          pageCount: Math.max(1, Math.ceil(matched.length / pageSize)),
+          results: slice.map((i) => ({
+            data: {
+              id: i.id,
+              name: { en_US: i.name },
+              inventory_type: i.inventory_type,
+              quality: i.quality,
+              level: i.level,
+              required_level: i.required_level,
+              item_class: i.item_class,
+              item_subclass: i.item_subclass,
+            },
+          })),
+        });
+        return;
+      }
+
       if (req.method === 'GET' && url.pathname.startsWith('/data/wow/media/item/')) {
         if (options.failUpstream) {
           send(res, 503, { error: 'unavailable' });
@@ -235,7 +396,7 @@ export async function startMockBlizzard(
           send(res, 403, { error: 'classic_namespace_rejected' });
           return;
         }
-        // Accept Forever static (unconfirmed official name; mock allows it for future enablement).
+        // Forever static namespace only (confirmed 2026-11-04).
         if (!ns.startsWith('static-forever-')) {
           send(res, 403, { error: 'wrong_namespace' });
           return;
@@ -258,8 +419,9 @@ export async function startMockBlizzard(
         } else if (itemId === 90004) {
           value = 'not a url';
         } else {
-          const iconName = itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`;
-          value = `https://render.worldofwarcraft.com/us/icons/56/${iconName}.jpg`;
+          const fixture = FIXTURE_FOREVER_ITEMS.find((i) => i.id === itemId);
+          const name = fixture?.icon ?? (itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`);
+          value = `https://render.worldofwarcraft.com/forever-us/icons/56/${name}.jpg`;
         }
         send(res, 200, {
           assets: [{ key: 'icon', value }],

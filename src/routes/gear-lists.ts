@@ -12,6 +12,7 @@ import {
   type GearSource,
 } from '../gear/schema.js';
 import * as gear from '../gear/store.js';
+import * as foreverItems from '../items/store.js';
 
 export type GearListDeps = { pool: Pool };
 
@@ -391,12 +392,17 @@ export async function registerGearListRoutes(
       const selection = await authStore.getSelection(pool, s.userId);
       requireOwnedCharacter(selection, list.character_id);
 
+      const catalogActive = await foreverItems.catalogIsActive(client);
       const result = await gear.applyOps(client, {
         list,
         ops,
         defaultSource: 'web',
         actor,
         ignored,
+        foreverCheck: async (itemId) => {
+          if (!catalogActive) return true;
+          return foreverItems.itemExists(client, itemId);
+        },
       });
       const fresh = await gear.getList(client, listId);
       const items = await gear.getItems(client, listId);
@@ -453,14 +459,6 @@ export async function registerGearListRoutes(
     } finally {
       client.release();
     }
-  });
-
-  app.get('/api/v1/items/search', async () => {
-    throw new AppError(
-      501,
-      'not_implemented',
-      'Forever item search is not available yet.',
-    );
   });
 
   app.post('/api/v1/sync', { bodyLimit: MAX_SYNC_BYTES }, async (req, reply) => {
@@ -536,12 +534,17 @@ export async function registerGearListRoutes(
             continue;
           }
 
+          const catalogActive = await foreverItems.catalogIsActive(client);
           const result = await gear.applyOps(client, {
             list,
             ops: entry.ops,
             defaultSource: envelope.source,
             actor,
             ignored: entry.ignored,
+            foreverCheck: async (itemId) => {
+              if (!catalogActive) return true;
+              return foreverItems.itemExists(client, itemId);
+            },
           });
           const events = await gear.listEvents(client, {
             listId: list.id,

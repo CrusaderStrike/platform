@@ -338,15 +338,13 @@ describe('gear lists (platform#17)', () => {
     expect(body.gear[0]!.events.some((e) => e.event_type === 'GearItemAdded')).toBe(true);
   });
 
-  it('GET /items/search returns 501 not_implemented', async () => {
-    const { cookie } = await signIn(ctx);
+    it('GET /items/search is aliased to Forever catalog (empty until import)', async () => {
     const res = await ctx.app.inject({
       method: 'GET',
       url: '/api/v1/items/search?q=thunder',
-      headers: { cookie },
     });
-    expect(res.statusCode).toBe(501);
-    expect(res.json()).toMatchObject({ error: { code: 'not_implemented' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ items: [], next_cursor: null });
   });
 
   it('events history includes actor display_name', async () => {
