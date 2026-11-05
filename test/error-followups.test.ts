@@ -85,7 +85,7 @@ describe('error envelope follow-ups (platform#53)', () => {
         payload,
       });
       expect(res.statusCode).toBe(400);
-      expect(res.json()).toEqual({ errors: { body: 'invalid_json' } });
+      expect(res.json()).toEqual({ errors: { body: 'invalid_json' }, message: 'Request body is not valid JSON.' });
     },
   );
 
@@ -99,7 +99,7 @@ describe('error envelope follow-ups (platform#53)', () => {
       payload: '{"name":',
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json()).toEqual({ errors: { body: 'invalid_json' } });
+    expect(res.json()).toEqual({ errors: { body: 'invalid_json' }, message: 'Request body is not valid JSON.' });
   });
 
   it('(d) 500 omits stack and internal message', async () => {

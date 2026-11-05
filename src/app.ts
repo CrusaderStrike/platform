@@ -98,7 +98,11 @@ export function registerErrorHandler(app: FastifyInstance, opts: { cookieSecure:
       fstCode === 'FST_ERR_CTP_EMPTY_JSON_BODY' ||
       (err instanceof SyntaxError && (err as { statusCode?: number }).statusCode === 400)
     ) {
-      return reply.code(400).send({ errors: { body: 'invalid_json' } });
+      // platform#55: `invalid_json` is a field-error value (not an error.code). The additive
+      // human-readable `message` lets clients show text without changing the `errors` map.
+      return reply
+        .code(400)
+        .send({ errors: { body: 'invalid_json' }, message: 'Request body is not valid JSON.' });
     }
     if ((err as { statusCode?: number }).statusCode === 415) {
       return reply
