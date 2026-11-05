@@ -40,6 +40,15 @@ export type BlizzardClient = {
   fetchForeverCharacters(accessToken: string, region: BlizzardRegion): Promise<NormalizedCharacter[]>;
   /** Fetch Forever characters across all configured regions and merge. */
   fetchForeverCharactersAll(accessToken: string): Promise<NormalizedCharacter[]>;
+  /**
+   * Item Media icon HTTPS URL via static-classic-{region}.
+   * Returns null when Blizzard has no icon asset.
+   */
+  fetchItemIconUrl(
+    accessToken: string,
+    itemId: number,
+    region?: BlizzardRegion,
+  ): Promise<{ iconUrl: string | null; iconName: string | null }>;
 };
 
 function mapFaction(raw?: string | null): 'alliance' | 'horde' | null {
@@ -194,6 +203,35 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
         }
       }
       return all;
+    },
+    async fetchItemIconUrl(accessToken, itemId, region = cfg.region) {
+      const r = isBlizzardRegion(region) ? region : cfg.region;
+      const ns = `static-classic-${r}`;
+      const url = `${apiBaseFor(r)}/data/wow/media/item/${itemId}?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (res.status === 404) return { iconUrl: null, iconName: null };
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_media_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      const body = (await res.json()) as {
+        assets?: Array<{ key?: string; value?: string }>;
+      };
+      const icon = (body.assets ?? []).find((a) => a.key === 'icon');
+      const iconUrl = icon?.value && /^https:\/\//i.test(icon.value) ? icon.value : null;
+      let iconName: string | null = null;
+      if (iconUrl) {
+        const m = iconUrl.match(/\/([a-zA-Z0-9_-]+)\.(jpg|png|webp)(?:\?|$)/i);
+        iconName = m?.[1] ?? null;
+      }
+      return { iconUrl, iconName };
     },
   };
 }

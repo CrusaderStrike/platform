@@ -15,9 +15,9 @@ async function main() {
     clientSecret: config.BLIZZARD_CLIENT_SECRET || 'unused',
     region: config.BLIZZARD_REGION,
     regions: config.BLIZZARD_REGIONS,
-    authorizeUrl: config.BLIZZARD_OAUTH_AUTHORIZE_URL,
-    tokenUrl: config.BLIZZARD_OAUTH_TOKEN_URL,
-    apiBaseUrl: config.BLIZZARD_API_BASE_URL,
+    authorizeUrl: config.oauthAuthorizeUrl,
+    tokenUrl: config.oauthTokenUrl,
+    apiBaseUrl: config.apiBaseUrl,
     redirectUri: config.BLIZZARD_REDIRECT_URI,
   });
 

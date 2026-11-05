@@ -354,6 +354,42 @@ export async function clearLastRefreshed(db: Db, userId: string): Promise<void> 
   await db.query(`UPDATE users SET last_refreshed_at = NULL WHERE id = $1`, [userId]);
 }
 
+
+export async function clearUserTokens(db: Db, userId: string): Promise<void> {
+  await db.query(
+    `UPDATE users SET access_token = NULL, refresh_token = NULL, token_expires_at = NULL, updated_at = now()
+     WHERE id = $1`,
+    [userId],
+  );
+}
+
+export async function getCachedItemIcon(
+  db: Db,
+  itemId: number,
+  region: string,
+): Promise<{ icon_url: string | null; icon_name: string | null } | null> {
+  const res = await db.query<{ icon_url: string | null; icon_name: string | null }>(
+    `SELECT icon_url, icon_name FROM item_icon_cache WHERE item_id = $1 AND region = $2`,
+    [itemId, region],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function upsertCachedItemIcon(
+  db: Db,
+  args: { itemId: number; region: string; iconUrl: string | null; iconName: string | null },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO item_icon_cache (item_id, region, icon_url, icon_name, updated_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (item_id, region) DO UPDATE SET
+       icon_url = EXCLUDED.icon_url,
+       icon_name = EXCLUDED.icon_name,
+       updated_at = now()`,
+    [args.itemId, args.region, args.iconUrl, args.iconName],
+  );
+}
+
 export function characterToApi(c: CharacterRow) {
   return {
     id: c.id,

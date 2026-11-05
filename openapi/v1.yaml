@@ -1244,7 +1244,14 @@ components:
           type: [string, 'null']
           enum: [poor, common, uncommon, rare, epic, legendary, null]
         ilvl: { type: [integer, 'null'], minimum: 1 }
-        icon: { type: [string, 'null'], maxLength: 128, description: "Blizzard icon asset name without file extension." }
+        icon: { type: [string, 'null'], maxLength: 128, description: "Blizzard icon asset name without file extension (compat)." }
+        icon_url:
+          type: [string, 'null']
+          format: uri
+          description: |
+            Full HTTPS URL from Blizzard Item Media (`GET /data/wow/media/item/{itemId}`,
+            namespace `static-classic-{region}`, `assets[key=icon].value`). Platform resolves and
+            caches this; clients must not build `render.worldofwarcraft.com` URLs themselves.
     CharacterGearInput:
       type: object
       required: [items]

@@ -1,7 +1,22 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { isSafeReturnTo, safeWebRedirect } from '../src/lib/crypto.js';
-import { shutdownEmbeddedPg, signIn, startTestApp, TEST_TOKEN_ENC_KEY, type TestCtx } from './helpers/setup.js';
+import {
+  decryptSecret,
+  encryptSecret,
+  FORBIDDEN_TOKEN_ENC_KEYS,
+  isSafeReturnTo,
+  safeWebRedirect,
+  TokenDecryptError,
+  validateTokenEncKey,
+} from '../src/lib/crypto.js';
+import {
+  shutdownEmbeddedPg,
+  signIn,
+  startTestApp,
+  TEST_TOKEN_ENC_KEY,
+  PROD_SAFE_TOKEN_ENC_KEY,
+  type TestCtx,
+} from './helpers/setup.js';
 
 describe('Blizzard OAuth + characters (#11)', () => {
   let ctx: TestCtx;
@@ -150,6 +165,8 @@ describe('Blizzard OAuth + characters (#11)', () => {
     // Unit: control-char path must not pass isSafeReturnTo / safeWebRedirect
     expect(isSafeReturnTo('/\t/evil.com')).toBe(false);
     expect(isSafeReturnTo('/%09/evil.com')).toBe(false);
+    expect(isSafeReturnTo('/%2F%2Fevil.com')).toBe(false); // normalizes to //evil.com
+    expect(isSafeReturnTo('/%2f/evil.com')).toBe(false); // normalizes to ///evil.com → starts with //
     expect(() => safeWebRedirect('https://crusaderstrike.com', '/\t/evil.com')).toThrow();
   });
 
@@ -267,10 +284,16 @@ describe('Blizzard OAuth + characters (#11)', () => {
       },
     });
     expect(put.statusCode).toBe(200);
-    expect(put.json()).toMatchObject({
+    const putBody = put.json() as {
+      character_id: string;
+      items: Array<{ slot: string; itemId: number; icon: string | null; icon_url: string | null }>;
+    };
+    expect(putBody).toMatchObject({
       character_id: id,
       items: [{ slot: 'head', itemId: 12345, name: 'Crown' }],
     });
+    expect(putBody.items[0]!.icon_url).toMatch(/^https:\/\/render\.worldofwarcraft\.com\//);
+    expect(putBody.items[0]!.icon).toBeTruthy();
 
     const get = await ctx.app.inject({
       method: 'GET',
@@ -280,7 +303,19 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(get.statusCode).toBe(200);
     expect(get.json()).toMatchObject({
       character_id: id,
-      items: [{ itemId: 12345 }],
+      items: [{ itemId: 12345, icon_url: putBody.items[0]!.icon_url }],
+    });
+
+    // Cache hit: second PUT with same itemId does not need a new upstream shape
+    const put2 = await ctx.app.inject({
+      method: 'PUT',
+      url: `/api/v1/characters/${id}/gear`,
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+      payload: { items: [{ slot: 'head', itemId: 12345, name: 'Crown2', quality: 'epic', ilvl: 60 }] },
+    });
+    expect(put2.statusCode).toBe(200);
+    expect(put2.json()).toMatchObject({
+      items: [{ itemId: 12345, icon_url: putBody.items[0]!.icon_url }],
     });
   });
 
@@ -307,17 +342,66 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(row.rows[0]!.refresh_token.startsWith('v1:')).toBe(true);
     expect(row.rows[0]!.access_token.includes('access_')).toBe(false);
   });
+
+  it('429 refresh exposes Retry-After to credentialed CORS browsers', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/me/characters/refresh',
+      headers: {
+        cookie,
+        'x-csrf-token': csrf,
+        origin: 'https://crusaderstrike.com',
+      },
+    });
+    const second = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/me/characters/refresh',
+      headers: {
+        cookie,
+        'x-csrf-token': csrf,
+        origin: 'https://crusaderstrike.com',
+      },
+    });
+    expect(second.statusCode).toBe(429);
+    expect(second.headers['retry-after']).toBeTruthy();
+    const expose = String(second.headers['access-control-expose-headers'] ?? '');
+    expect(expose.toLowerCase().split(/,\s*/)).toContain('retry-after');
+  });
+
+  it('refresh with non-v1 token → 401 and tokens cleared', async () => {
+    ctx = await startTestApp();
+    const { cookie, csrf } = await signIn(ctx);
+    await ctx.pool.query(`UPDATE users SET access_token = 'plaintext_access', refresh_token = 'plaintext_refresh'`);
+    await ctx.app.clearRefreshCooldowns?.();
+    const refresh = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/me/characters/refresh',
+      headers: { cookie, 'x-csrf-token': csrf },
+    });
+    expect(refresh.statusCode).toBe(401);
+    expect(refresh.json()).toMatchObject({ error: { code: 'unauthenticated' } });
+    const row = await ctx.pool.query<{ access_token: string | null }>(
+      `SELECT access_token FROM users LIMIT 1`,
+    );
+    expect(row.rows[0]!.access_token).toBeNull();
+  });
 });
 
 describe('config guards', () => {
+  const base = {
+    DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
+    SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
+    BLIZZARD_CLIENT_ID: 'id',
+    BLIZZARD_CLIENT_SECRET: 'secret',
+  };
+
   it('BLIZZARD_MOCK defaults to false', () => {
     const cfg = loadConfig({
+      ...base,
       NODE_ENV: 'development',
-      DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
-      SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
       TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
-      BLIZZARD_CLIENT_ID: 'id',
-      BLIZZARD_CLIENT_SECRET: 'secret',
     });
     expect(cfg.BLIZZARD_MOCK).toBe(false);
   });
@@ -325,13 +409,10 @@ describe('config guards', () => {
   it('fails when NODE_ENV=production and BLIZZARD_MOCK=true', () => {
     expect(() =>
       loadConfig({
+        ...base,
         NODE_ENV: 'production',
-        DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
-        SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
-        TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
+        TOKEN_ENC_KEY: PROD_SAFE_TOKEN_ENC_KEY,
         BLIZZARD_MOCK: 'true',
-        BLIZZARD_CLIENT_ID: 'id',
-        BLIZZARD_CLIENT_SECRET: 'secret',
       }),
     ).toThrow(/BLIZZARD_MOCK/);
   });
@@ -339,13 +420,90 @@ describe('config guards', () => {
   it('rejects unknown region in BLIZZARD_REGIONS at startup', () => {
     expect(() =>
       loadConfig({
+        ...base,
         NODE_ENV: 'development',
-        DATABASE_URL: 'postgres://x:x@127.0.0.1:5432/x',
-        SESSION_SECRET: 'test-session-secret-at-least-32-chars!!',
         TOKEN_ENC_KEY: TEST_TOKEN_ENC_KEY,
         BLIZZARD_MOCK: 'true',
         BLIZZARD_REGIONS: 'us,cn',
       }),
     ).toThrow(/Unsupported Blizzard region/);
   });
+
+  it('rejects example TOKEN_ENC_KEY in production without echoing the key', () => {
+    const example = [...FORBIDDEN_TOKEN_ENC_KEYS][0]!;
+    expect(() =>
+      loadConfig({
+        ...base,
+        NODE_ENV: 'production',
+        TOKEN_ENC_KEY: example,
+      }),
+    ).toThrow(/example\/placeholder/);
+    try {
+      loadConfig({ ...base, NODE_ENV: 'production', TOKEN_ENC_KEY: example });
+    } catch (err) {
+      expect(String(err)).not.toContain(example);
+    }
+  });
+
+  it('rejects short and malformed TOKEN_ENC_KEY', () => {
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'development', TOKEN_ENC_KEY: 'abcd' }),
+    ).toThrow(/64 hex/);
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'production', TOKEN_ENC_KEY: 'zz'.repeat(32) }),
+    ).toThrow(/64 hex/);
+  });
+
+  it('rejects low-entropy TOKEN_ENC_KEY in production', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        NODE_ENV: 'production',
+        TOKEN_ENC_KEY: '0'.repeat(64),
+      }),
+    ).toThrow(/low-entropy/);
+  });
+
+  it('accepts a valid TOKEN_ENC_KEY in production', () => {
+    const cfg = loadConfig({
+      ...base,
+      NODE_ENV: 'production',
+      TOKEN_ENC_KEY: PROD_SAFE_TOKEN_ENC_KEY,
+      BLIZZARD_MOCK: 'false',
+    });
+    expect(cfg.TOKEN_ENC_KEY).toBe(PROD_SAFE_TOKEN_ENC_KEY);
+  });
 });
+
+describe('token encryption', () => {
+  it('v1: round-trip', () => {
+    const key = PROD_SAFE_TOKEN_ENC_KEY;
+    const enc = encryptSecret('access_hello', key);
+    expect(enc.startsWith('v1:')).toBe(true);
+    expect(decryptSecret(enc, key)).toBe('access_hello');
+  });
+
+  it('rejects unprefixed plaintext tokens everywhere', () => {
+    expect(() => decryptSecret('access_plain', PROD_SAFE_TOKEN_ENC_KEY)).toThrow(TokenDecryptError);
+    try {
+      decryptSecret('access_plain', PROD_SAFE_TOKEN_ENC_KEY);
+    } catch (err) {
+      expect(err).toBeInstanceOf(TokenDecryptError);
+      expect((err as TokenDecryptError).code).toBe('missing_prefix');
+    }
+  });
+
+  it('decrypts with TOKEN_ENC_KEY_PREVIOUS during rotation', () => {
+    const oldKey = PROD_SAFE_TOKEN_ENC_KEY;
+    const newKey = 'ff' + PROD_SAFE_TOKEN_ENC_KEY.slice(2);
+    const enc = encryptSecret('tok', oldKey);
+    expect(decryptSecret(enc, newKey, { previousKeyHex: oldKey })).toBe('tok');
+  });
+
+  it('validateTokenEncKey covers example and length', () => {
+    expect(validateTokenEncKey(TEST_TOKEN_ENC_KEY).ok).toBe(false);
+    expect(validateTokenEncKey(PROD_SAFE_TOKEN_ENC_KEY).ok).toBe(true);
+    expect(validateTokenEncKey('short').ok).toBe(false);
+  });
+});
+

@@ -214,6 +214,40 @@ export async function startMockBlizzard(
         return;
       }
 
+
+      if (req.method === 'GET' && url.pathname.startsWith('/data/wow/media/item/')) {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        if (!ns.startsWith('static-classic-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        const idStr = url.pathname.split('/').pop() ?? '';
+        const itemId = Number(idStr);
+        if (!Number.isInteger(itemId) || itemId < 1) {
+          send(res, 404, { code: 404 });
+          return;
+        }
+        const iconName = itemId === 12345 ? 'inv_helmet_03' : `inv_misc_${itemId}`;
+        send(res, 200, {
+          assets: [
+            {
+              key: 'icon',
+              value: `https://render.worldofwarcraft.com/us/icons/56/${iconName}.jpg`,
+            },
+          ],
+        });
+        return;
+      }
+
       send(res, 404, { error: 'not_found', path: url.pathname });
     } catch (err) {
       send(res, 500, { error: 'internal', message: String(err) });

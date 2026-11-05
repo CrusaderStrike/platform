@@ -1,5 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from '../db/pool.js';
+import type { Config } from '../config.js';
+import type { BlizzardClient } from '../blizzard/client.js';
+import { decryptSecret, TokenDecryptError } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
 import * as store from '../auth/store.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
@@ -11,7 +14,11 @@ const SLOTS = new Set([
 ]);
 const QUALITIES = new Set(['poor', 'common', 'uncommon', 'rare', 'epic', 'legendary', null]);
 
-export type GearDeps = { pool: Pool };
+export type GearDeps = {
+  pool: Pool;
+  config: Config;
+  blizzard: BlizzardClient;
+};
 
 type EquippedItemIn = {
   slot?: string;
@@ -20,6 +27,17 @@ type EquippedItemIn = {
   quality?: string | null;
   ilvl?: number | null;
   icon?: string | null;
+  icon_url?: string | null;
+};
+
+type EquippedItemOut = {
+  slot: string;
+  itemId: number;
+  name: string | null;
+  quality: string | null;
+  ilvl: number | null;
+  icon: string | null;
+  icon_url: string | null;
 };
 
 function validateItems(items: unknown): EquippedItemIn[] {
@@ -53,23 +71,80 @@ function validateItems(items: unknown): EquippedItemIn[] {
       quality: it.quality ?? null,
       ilvl: it.ilvl ?? null,
       icon: it.icon ?? null,
+      // Client-supplied icon_url is ignored; platform resolves from Blizzard Item Media.
+    });
+  }
+  return out;
+}
+
+async function resolveIconUrl(
+  pool: Pool,
+  blizzard: BlizzardClient,
+  accessToken: string | null,
+  itemId: number,
+  region: string,
+): Promise<{ icon_url: string | null; icon_name: string | null }> {
+  const cached = await store.getCachedItemIcon(pool, itemId, region);
+  if (cached) return cached;
+  if (!accessToken) return { icon_url: null, icon_name: null };
+  try {
+    const media = await blizzard.fetchItemIconUrl(accessToken, itemId, region as 'us');
+    await store.upsertCachedItemIcon(pool, {
+      itemId,
+      region,
+      iconUrl: media.iconUrl,
+      iconName: media.iconName,
+    });
+    return { icon_url: media.iconUrl, icon_name: media.iconName };
+  } catch {
+    return { icon_url: null, icon_name: null };
+  }
+}
+
+async function enrichItems(
+  pool: Pool,
+  config: Config,
+  blizzard: BlizzardClient,
+  user: store.UserRow | null,
+  items: EquippedItemIn[],
+  region: string,
+): Promise<EquippedItemOut[]> {
+  let access: string | null = null;
+  if (user?.access_token) {
+    try {
+      access = decryptSecret(user.access_token, config.TOKEN_ENC_KEY, {
+        previousKeyHex: config.TOKEN_ENC_KEY_PREVIOUS,
+      });
+    } catch {
+      access = null;
+    }
+  }
+  const out: EquippedItemOut[] = [];
+  for (const it of items) {
+    const icon = await resolveIconUrl(pool, blizzard, access, it.itemId!, region);
+    out.push({
+      slot: it.slot!,
+      itemId: it.itemId!,
+      name: it.name ?? null,
+      quality: it.quality ?? null,
+      ilvl: typeof it.ilvl === 'number' ? it.ilvl : null,
+      icon: it.icon ?? icon.icon_name ?? null,
+      icon_url: icon.icon_url,
     });
   }
   return out;
 }
 
 export async function registerGearRoutes(app: FastifyInstance, deps: GearDeps): Promise<void> {
-  const { pool } = deps;
+  const { pool, config, blizzard } = deps;
 
   app.get<{ Params: { character_id: string } }>(
     '/api/v1/characters/:character_id/gear',
     async (req) => {
       const s = requireSession(req);
       const characterId = req.params.character_id;
-      // Slice-1 visibility: owner can always read. Guild-wide visibility lands with #2 memberships.
       const owned = await store.getCharacterForUser(pool, s.userId, characterId);
       if (!owned) {
-        // Hide existence from non-owners for now (404). Guild visibility widens this later.
         throw new AppError(404, 'not_found', 'Character not found.');
       }
       const gear = await store.getCharacterGear(pool, characterId);
@@ -96,7 +171,16 @@ export async function registerGearRoutes(app: FastifyInstance, deps: GearDeps): 
       }
       const body = req.body as { items?: unknown };
       const items = validateItems(body?.items);
-      const saved = await store.putCharacterGear(pool, characterId, items);
+      const user = await store.getUser(pool, s.userId);
+      const enriched = await enrichItems(
+        pool,
+        config,
+        blizzard,
+        user,
+        items,
+        owned.region,
+      );
+      const saved = await store.putCharacterGear(pool, characterId, enriched);
       return {
         character_id: saved.character_id,
         updated_at: saved.updated_at.toISOString(),

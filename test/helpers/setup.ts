@@ -14,6 +14,10 @@ import type { FastifyInstance } from 'fastify';
 export const TEST_TOKEN_ENC_KEY =
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
+/** Valid non-placeholder key for production config tests. */
+export const PROD_SAFE_TOKEN_ENC_KEY =
+  'a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00';
+
 export type TestCtx = {
   app: FastifyInstance;
   pool: Pool;
@@ -70,7 +74,7 @@ export async function startTestApp(opts?: {
   const url = await ensurePg();
   const pool = createPool(url);
   await pool.query(`
-    TRUNCATE character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
+    TRUNCATE item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
   `);
 
   const mock = await startMockBlizzard({
