@@ -100,8 +100,23 @@ describe('Forever items catalog', () => {
     expect(mapInventoryType('FINGER')).toEqual({ slot: 'finger1', aliases: ['finger2'] });
     expect(mapInventoryType('WEAPON')).toEqual({ slot: 'main_hand', aliases: ['off_hand'] });
     expect(mapInventoryType('CLOAK')?.slot).toBe('back');
+    expect(mapInventoryType('TWOHWEAPON')?.slot).toBe('main_hand');
+    expect(mapInventoryType('2HWEAPON')?.slot).toBe('main_hand');
+    expect(mapInventoryType('RELIC')?.slot).toBe('ranged');
+    expect(mapInventoryType('AMMO')?.slot).toBe('ranged');
+    expect(mapInventoryType('THROWN')?.slot).toBe('ranged');
+    expect(mapInventoryType('TABARD')?.slot).toBe('tabard');
+    expect(mapInventoryType('TRINKET')).toEqual({ slot: 'trinket1', aliases: ['trinket2'] });
     expect(armorTypeFromClass(4, 3)).toBe('mail');
     expect(armorTypeFromClass(2, 7)).toBeNull();
+  });
+
+  it('IMPORT_INVENTORY_TYPES includes Forever TWOHWEAPON, RELIC, AMMO (not empty 2HWEAPON)', async () => {
+    const { IMPORT_INVENTORY_TYPES } = await import('../src/items/mapping.js');
+    expect(IMPORT_INVENTORY_TYPES).toContain('TWOHWEAPON');
+    expect(IMPORT_INVENTORY_TYPES).toContain('RELIC');
+    expect(IMPORT_INVENTORY_TYPES).toContain('AMMO');
+    expect(IMPORT_INVENTORY_TYPES).not.toContain('2HWEAPON');
   });
 
   it('GET /api/v1/items filters by slot, class, q and returns snake_case Forever fields', async () => {

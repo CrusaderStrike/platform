@@ -1,6 +1,9 @@
 /**
  * Map Blizzard Forever inventory_type.type → platform GearSlot (+ aliases).
  * Finger / trinket / one-hand weapons may match multiple slots in search.
+ *
+ * Forever static search uses TWOHWEAPON (not 2HWEAPON). Keep both keys so
+ * detail payloads and older docs still map.
  */
 import { GEAR_SLOTS, type GearSlot } from '../gear/schema.js';
 
@@ -24,6 +27,7 @@ const INV_TO_SLOT: Record<string, SlotMapping> = {
   TRINKET: { slot: 'trinket1', aliases: ['trinket2'] },
   WEAPON: { slot: 'main_hand', aliases: ['off_hand'] },
   '2HWEAPON': { slot: 'main_hand', aliases: [] },
+  TWOHWEAPON: { slot: 'main_hand', aliases: [] },
   WEAPONMAINHAND: { slot: 'main_hand', aliases: [] },
   WEAPONOFFHAND: { slot: 'off_hand', aliases: [] },
   HOLDABLE: { slot: 'off_hand', aliases: [] },
@@ -34,7 +38,9 @@ const INV_TO_SLOT: Record<string, SlotMapping> = {
   CLOAK: { slot: 'back', aliases: [] },
   TABARD: { slot: 'tabard', aliases: [] },
   ROBE: { slot: 'chest', aliases: [] },
+  /** Arrows / bullets — Forever inventory_type AMMO (subclass distinguishes). */
   AMMO: { slot: 'ranged', aliases: [] },
+  /** Relics / librams / totems / idols — Forever inventory_type RELIC. */
   RELIC: { slot: 'ranged', aliases: [] },
 };
 
@@ -76,7 +82,11 @@ export function normalizeQuality(raw: string | null | undefined): string {
   return raw.toLowerCase();
 }
 
-/** Inventory types the importer walks (covers all 19 GearSlots). */
+/**
+ * Inventory types the importer walks (covers all 19 GearSlots).
+ * Forever search confirmed 2026-11-05: TWOHWEAPON (2HWEAPON returns empty),
+ * RELIC (libram/totem/idol/relic), AMMO (arrows/bullets).
+ */
 export const IMPORT_INVENTORY_TYPES = [
   'HEAD',
   'NECK',
@@ -91,7 +101,7 @@ export const IMPORT_INVENTORY_TYPES = [
   'FINGER',
   'TRINKET',
   'WEAPON',
-  '2HWEAPON',
+  'TWOHWEAPON',
   'WEAPONMAINHAND',
   'WEAPONOFFHAND',
   'HOLDABLE',
@@ -102,4 +112,8 @@ export const IMPORT_INVENTORY_TYPES = [
   'CLOAK',
   'TABARD',
   'ROBE',
+  'RELIC',
+  'AMMO',
 ] as const;
+
+export type ImportInventoryType = (typeof IMPORT_INVENTORY_TYPES)[number];
