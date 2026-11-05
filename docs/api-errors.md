@@ -39,7 +39,7 @@ When known, rate limits and upstream outages set the **`Retry-After`** response 
 | `unauthenticated` | 401 | no | No `cs_session` cookie (caller must sign in). |
 | `session_expired` | 401 | no | Cookie present but session expired/revoked/unknown or malformed (non-UUID) — response clears `cs_session`, or stored Blizzard token invalid/unauthorized (caller must clear session and sign in again). |
 | `csrf_failed` | 403 | no | Missing/mismatched `X-CSRF-Token` on a mutating cookie request. |
-| `validation_error` | 400 | no | Body/query failed validation (`errors` field map when present; malformed JSON → `{"errors":{"body":"invalid_json"}}`). |
+| `validation_error` | 400 | no | Body/query failed validation (`errors` field map when present; malformed JSON → `{"errors":{"body":"invalid_json"},"message":"Request body is not valid JSON."}` — see note below). |
 | `not_found` | 404 | no | Resource not visible / does not exist. |
 | `forbidden` | 403 | no | Authenticated but not allowed. |
 | `rate_limited` | 429 | **yes** | Rate limit exceeded; `Retry-After` sent when known — honor it. |
@@ -55,3 +55,13 @@ When known, rate limits and upstream outages set the **`Retry-After`** response 
 Items catalog routes are public (no session). Gear-lists and selection require a session; they emit `unauthenticated` / `session_expired` as above. Selection refresh is the scoped path that may emit `upstream_unavailable` or `session_expired` from Blizzard token failures.
 
 See also `openapi/v1.yaml` → `components.schemas.Error` and `x-error-codes`.
+
+### Note: `invalid_json` (platform#55)
+
+`invalid_json` is a **field-error value** inside the `errors` map (`errors.body`), **not** an `error.code` — it never appears in the code table above. Malformed or empty JSON bodies return HTTP 400 with:
+
+```json
+{ "errors": { "body": "invalid_json" }, "message": "Request body is not valid JSON." }
+```
+
+Treat it like any other 400 field-map response (non-retryable). The top-level `message` is human-readable and safe to display; clients that only read `errors` are unaffected.
