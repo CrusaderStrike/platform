@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { safeEqual } from '../lib/crypto.js';
-import { AppError } from '../lib/errors.js';
+import { AppError, isUuid } from '../lib/errors.js';
 import type { Pool } from '../db/pool.js';
 import * as store from './store.js';
 
@@ -24,6 +24,9 @@ declare module 'fastify' {
 export async function loadSession(pool: Pool, req: FastifyRequest): Promise<RequestSession | null> {
   const sid = req.cookies?.[SESSION_COOKIE];
   if (!sid) return null;
+  // Malformed cookie (not a UUID) can never match a session; skip the query so
+  // Postgres doesn't raise 22P02 → 500. requireSession then emits session_expired.
+  if (!isUuid(sid)) return null;
   const row = await store.getSession(pool, sid);
   if (!row) return null;
   return {

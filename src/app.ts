@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { clearSessionCookie } from './auth/session.js';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import type { Pool } from './db/pool.js';
@@ -41,8 +42,39 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   });
   await app.register(cookie);
 
+  registerErrorHandler(app, { cookieSecure: opts.config.cookieSecure });
+
+  // Deploy identity only — never attach env, version strings, or other build metadata.
+  const healthz = () => ({ ok: true as const, sha: opts.config.BUILD_SHA });
+  app.get('/healthz', async () => healthz());
+  app.get('/api/v1/healthz', async () => healthz());
+
+  const redirectUri = opts.redirectUri ?? opts.config.BLIZZARD_REDIRECT_URI;
+
+  await registerAuthRoutes(app, {
+    pool: opts.pool,
+    config: opts.config,
+    blizzard: opts.blizzard,
+    redirectUri,
+  });
+  await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
+  await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
+  await registerUploadRoutes(app, { pool: opts.pool });
+  await registerGearListRoutes(app, { pool: opts.pool });
+  await registerPublicGuildRoutes(app, { pool: opts.pool });
+  await registerItemsRoutes(app, { pool: opts.pool });
+
+  return app;
+}
+
+/** Central error handler (exported so tests can mount it on a bare instance). */
+export function registerErrorHandler(app: FastifyInstance, opts: { cookieSecure: boolean }): void {
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof AppError) {
+      if (err.code === 'session_expired') {
+        // Dead/malformed cookie: tell the browser to drop it (platform#53).
+        clearSessionCookie(reply, opts.cookieSecure);
+      }
       if (err.retryAfterSec !== undefined && err.retryAfterSec >= 0) {
         reply.header('Retry-After', String(err.retryAfterSec));
       }
@@ -52,12 +84,21 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       }
       return reply
         .code(err.statusCode)
-        .send(publicErrorBody(err.code, err.message, String(req.id), err.retryable));
+        .send(publicErrorBody(err.code, err.message, String(req.id), err.retryable, err.details));
     }
     if ((err as { validation?: unknown }).validation) {
       return reply.code(400).send({
         errors: { body: 'Invalid request.' },
       });
+    }
+    // Malformed / empty JSON body → 400 validation_error using the #51 field-map shape.
+    const fstCode = (err as { code?: string }).code;
+    if (
+      fstCode === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+      fstCode === 'FST_ERR_CTP_EMPTY_JSON_BODY' ||
+      (err instanceof SyntaxError && (err as { statusCode?: number }).statusCode === 400)
+    ) {
+      return reply.code(400).send({ errors: { body: 'invalid_json' } });
     }
     if ((err as { statusCode?: number }).statusCode === 415) {
       return reply
@@ -98,25 +139,4 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       );
   });
 
-  // Deploy identity only — never attach env, version strings, or other build metadata.
-  const healthz = () => ({ ok: true as const, sha: opts.config.BUILD_SHA });
-  app.get('/healthz', async () => healthz());
-  app.get('/api/v1/healthz', async () => healthz());
-
-  const redirectUri = opts.redirectUri ?? opts.config.BLIZZARD_REDIRECT_URI;
-
-  await registerAuthRoutes(app, {
-    pool: opts.pool,
-    config: opts.config,
-    blizzard: opts.blizzard,
-    redirectUri,
-  });
-  await registerProfileRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
-  await registerGearRoutes(app, { pool: opts.pool, config: opts.config, blizzard: opts.blizzard });
-  await registerUploadRoutes(app, { pool: opts.pool });
-  await registerGearListRoutes(app, { pool: opts.pool });
-  await registerPublicGuildRoutes(app, { pool: opts.pool });
-  await registerItemsRoutes(app, { pool: opts.pool });
-
-  return app;
 }

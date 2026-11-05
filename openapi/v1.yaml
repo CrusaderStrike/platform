@@ -916,7 +916,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               example:
-                error: { code: list_limit_reached, message: Maximum of 20 gear lists per character., request_id: req_1 }
+                error: { code: list_limit_reached, message: Maximum of 20 gear lists per character., retryable: false, request_id: req_1, details: { limit: 20 } }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}:
@@ -1561,6 +1561,10 @@ components:
               type: boolean
               description: If true, a later retry may succeed (honor Retry-After when present).
             request_id: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              description: Optional non-sensitive structured details, e.g. `{ limit: 20 }` on `list_limit_reached` (platform#53).
     ValidationErrors:
       type: object
       description: Field-level validation errors (`errors` map of field → message).

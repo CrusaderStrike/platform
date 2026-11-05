@@ -346,7 +346,9 @@ export async function registerGearListRoutes(
     } catch (err) {
       await client.query('ROLLBACK');
       if (gear.isListLimitError(err)) {
-        throw new AppError(409, 'list_limit_reached', 'Maximum of 20 gear lists per character.');
+        throw new AppError(409, 'list_limit_reached', 'Maximum of 20 gear lists per character.', undefined, {
+          details: { limit: 20 },
+        });
       }
       throw err;
     } finally {
