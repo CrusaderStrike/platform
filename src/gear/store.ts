@@ -930,3 +930,39 @@ export function serializeEvent(ev: GearEventRow): Record<string, unknown> {
     recorded_at: ev.recorded_at.toISOString(),
   };
 }
+
+/** ~60 writes/min (1s min interval). Separate bucket from uploads. */
+export const GEAR_WRITE_COOLDOWN_MS = 1_000;
+
+export async function checkGearWriteRateLimit(
+  db: Db,
+  userId: string,
+): Promise<{ ok: true } | { ok: false; retryAfterSec: number }> {
+  const row = await db.query<{ last_at: Date }>(
+    `SELECT last_at FROM gear_write_rate_limits WHERE user_id = $1`,
+    [userId],
+  );
+  const last = row.rows[0]?.last_at;
+  if (last) {
+    const retryAfter = Math.ceil((last.getTime() + GEAR_WRITE_COOLDOWN_MS - Date.now()) / 1000);
+    if (retryAfter > 0) return { ok: false, retryAfterSec: retryAfter };
+  }
+  return { ok: true };
+}
+
+export async function touchGearWriteRateLimit(db: Db, userId: string): Promise<void> {
+  await db.query(
+    `INSERT INTO gear_write_rate_limits (user_id, last_at) VALUES ($1, now())
+     ON CONFLICT (user_id) DO UPDATE SET last_at = now()`,
+    [userId],
+  );
+}
+
+export async function clearGearWriteRateLimit(db: Db, userId?: string): Promise<void> {
+  if (userId) {
+    await db.query(`DELETE FROM gear_write_rate_limits WHERE user_id = $1`, [userId]);
+  } else {
+    await db.query(`DELETE FROM gear_write_rate_limits`);
+  }
+}
+

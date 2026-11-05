@@ -744,6 +744,7 @@ paths:
       description: |
         Max **5** active lists per character. A 6th create returns **409** `list_limit_reached`.
         Default `visibility` is `private`. Emits `GearListCreated` (seq=1).
+        Gear writes are rate-limited (~60/min per user); over limit → **429** with `Retry-After`.
       parameters:
         - name: character_id
           in: path
@@ -780,6 +781,7 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
               example:
                 error: { code: list_limit_reached, message: Maximum of 5 gear lists per character., request_id: req_1 }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}:
     get:
@@ -808,6 +810,7 @@ paths:
         Mismatch → **409** `version_mismatch` with `current: { version, list }` so the client
         can re-apply without another GET. Only the **owner** may write; officers get **403** `forbidden`.
         Emits `GearListRenamed` (name and/or visibility in payload).
+        Missing If-Match → **428** `precondition_required`. Rate-limited (~60/min) → **429** with `Retry-After`.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -849,6 +852,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearVersionMismatch' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
     delete:
       tags: [gear]
       operationId: deleteGearList
@@ -879,6 +883,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GearVersionMismatch' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /gear-lists/{list_id}/ops:
     post:
@@ -899,9 +904,10 @@ paths:
         **Undo obtained:** send `mark_obtained` with `obtained: false` (no separate op type).
 
         Unknown keys on individual ops are soft-ignored (listed in `ignored`). Envelope keys
-        beyond `ops`/`source` are rejected. Max 200 ops. Non-Forever `item_id` → the op is
-        rejected; when a Forever catalog is enforced, clients should prefer **422**
-        `item_not_forever` on single-item helpers — reserved code.
+        beyond `ops` are rejected (client `source` is ignored; server records `web`). Max 200 ops.
+        Non-Forever `item_id` → the op is rejected; when a Forever catalog is enforced, clients
+        should prefer **422** `item_not_forever` on single-item helpers — reserved code.
+        Rate-limited (~60/min per user) → **429** with `Retry-After`.
       parameters:
         - { $ref: '#/components/parameters/ListId' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -1039,7 +1045,8 @@ paths:
 
         Conflict rules: auto-merge by slot/item; last-writer-wins by `recorded_at`; stale
         `base_version` loses; delete wins; losers → `GearOpRejected` in `conflicts[]`.
-        Max body 1 MiB.
+        Max body 1 MiB. Rate-limited (~60/min per user) → **429** with `Retry-After`.
+        Per-list failures return a stable `error` object (no raw database messages).
       security: [{ uploaderToken: [] }, { session: [] }]
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:

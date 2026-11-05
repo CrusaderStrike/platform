@@ -5,7 +5,7 @@ import * as gear from '../src/gear/store.js';
 
 
 async function clearCooldown(ctx: TestCtx) {
-  await ctx.app.clearUploadCooldowns?.();
+  await ctx.app.clearGearWriteCooldowns?.();
 }
 
 async function selectMain(ctx: TestCtx, cookie: string, csrf: string) {
@@ -37,7 +37,7 @@ describe('gear lists (platform#17)', () => {
   beforeEach(async () => {
     // startTestApp truncates on each startTestApp call only once; re-truncate via helper path
     await ctx.pool.query(`
-      TRUNCATE upload_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
+      TRUNCATE upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
                gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
                item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
     `);
@@ -657,6 +657,53 @@ describe('gear lists (platform#17)', () => {
     expect(rmBody.duplicates).toEqual([]);
     expect(rmBody.conflicts).toEqual([]);
   });
+
+
+  it('allows several web edits ~1s apart under the 60/min write limit', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await clearCooldown(ctx);
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/characters/${characterId}/gear-lists`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: { name: 'Timed' },
+    });
+    expect(created.statusCode).toBe(201);
+    const list = created.json() as { id: string; version: number };
+    let version = list.version;
+    // Do not clear cooldown: wait ~1.1s between writes so each stays under ~60/min.
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, 1100));
+      const op = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/gear-lists/${list.id}/ops`,
+        headers: { cookie, 'x-csrf-token': csrf },
+        payload: {
+          ops: [
+            {
+              op_id: randomUUID(),
+              type: 'add_item',
+              slot: 'trinket1',
+              item_id: 2000 + i,
+              priority: 1,
+              base_version: version,
+            },
+          ],
+        },
+      });
+      expect(op.statusCode).toBe(200);
+      version = (op.json() as { version: number }).version;
+    }
+    await new Promise((r) => setTimeout(r, 1100));
+    const patch = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/gear-lists/${list.id}`,
+      headers: { cookie, 'x-csrf-token': csrf, 'if-match': `"v${version}"` },
+      payload: { name: 'Timed v2' },
+    });
+    expect(patch.statusCode).toBe(200);
+  }, 20_000);
 
   it('parallel ops/PATCH/create serialize without 500 and respect 5-list cap', async () => {
     const { cookie, csrf } = await signIn(ctx);

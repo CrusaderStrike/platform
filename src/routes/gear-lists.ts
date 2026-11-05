@@ -3,7 +3,6 @@ import type { Pool } from '../db/pool.js';
 import { AppError } from '../lib/errors.js';
 import { requireCsrf, requireSession } from '../auth/session.js';
 import * as authStore from '../auth/store.js';
-import * as upStore from '../uploads/store.js';
 import {
   MAX_LIST_NAME,
   MAX_OPS_PER_REQUEST,
@@ -74,8 +73,8 @@ async function requireGearWriteRate(
   reply: FastifyReply,
   userId: string,
 ): Promise<void> {
-  // Basic write rate limit (same 5s window as uploads). Separate gear bucket/tuning → follow-up.
-  const rate = await upStore.checkUploadRateLimit(pool, userId);
+  // ~60 writes/min (1s min interval). Further burst/tuning → follow-up.
+  const rate = await gear.checkGearWriteRateLimit(pool, userId);
   if (!rate.ok) {
     reply.header('Retry-After', String(rate.retryAfterSec));
     throw new AppError(429, 'rate_limited', 'Gear write is rate-limited. Try again shortly.');
@@ -169,7 +168,7 @@ export async function registerGearListRoutes(
         actor,
       });
       await client.query('COMMIT');
-      await upStore.touchUploadRateLimit(pool, s.userId);
+      await gear.touchGearWriteRateLimit(pool, s.userId);
       const items = await gear.getItems(pool, list.id);
       const serialized = gear.serializeList(list, items);
       reply.header('ETag', gear.etagForVersion(list.version));
@@ -276,7 +275,7 @@ export async function registerGearListRoutes(
       }
       const items = await gear.getItems(client, result.list.id);
       await client.query('COMMIT');
-      await upStore.touchUploadRateLimit(pool, s.userId);
+      await gear.touchGearWriteRateLimit(pool, s.userId);
       reply.header('ETag', gear.etagForVersion(result.list.version));
       return gear.serializeList(result.list, items);
     } catch (err) {
@@ -328,7 +327,7 @@ export async function registerGearListRoutes(
         });
       }
       await client.query('COMMIT');
-      await upStore.touchUploadRateLimit(pool, s.userId);
+      await gear.touchGearWriteRateLimit(pool, s.userId);
       return reply.code(204).send();
     } catch (err) {
       await client.query('ROLLBACK');
@@ -390,7 +389,7 @@ export async function registerGearListRoutes(
       const fresh = await gear.getList(client, listId);
       const items = await gear.getItems(client, listId);
       await client.query('COMMIT');
-      await upStore.touchUploadRateLimit(pool, s.userId);
+      await gear.touchGearWriteRateLimit(pool, s.userId);
       return {
         version: result.version,
         applied: result.applied,
@@ -549,15 +548,18 @@ export async function registerGearListRoutes(
           });
         } catch (err) {
           await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-          const message = err instanceof Error ? err.message : 'List sync failed.';
+          // Never leak raw Postgres / driver messages to clients.
           gearResults.push({
             list_id: entry.list_id,
-            error: { code: 'internal_error', message },
+            error: {
+              code: 'internal_error',
+              message: 'List sync failed.',
+            },
           });
         }
       }
       await client.query('COMMIT');
-      await upStore.touchUploadRateLimit(pool, s.userId);
+      await gear.touchGearWriteRateLimit(pool, s.userId);
       return {
         character_id: owned.id,
         source: envelope.source,
@@ -571,4 +573,14 @@ export async function registerGearListRoutes(
       client.release();
     }
   });
+
+  app.decorate('clearGearWriteCooldowns', async (userId?: string) => {
+    await gear.clearGearWriteRateLimit(pool, userId);
+  });
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    clearGearWriteCooldowns?: (userId?: string) => Promise<void>;
+  }
 }
