@@ -933,7 +933,7 @@ components:
         name: { type: string, maxLength: 48 }
         realm: { type: string, maxLength: 48 }
         class: { $ref: '#/components/schemas/WowClass' }
-        level: { type: integer, minimum: 1, maximum: 60 }
+        level: { type: integer, minimum: 1 }
         isPlayer: { type: boolean, description: True for the logging character. }
     BossKill:
       type: object
