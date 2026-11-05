@@ -23,13 +23,16 @@ ALTER TABLE guilds
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 
--- Personal tenants never get public slugs; uniqueness among real guilds with slugs.
+-- Personal tenants never get public slugs; uniqueness is (region, realm_slug, guild_slug).
 CREATE UNIQUE INDEX IF NOT EXISTS guilds_public_slug_uidx
-  ON guilds (realm_slug, guild_slug)
-  WHERE kind = 'guild' AND realm_slug IS NOT NULL AND guild_slug IS NOT NULL;
+  ON guilds (region, realm_slug, guild_slug)
+  WHERE kind = 'guild'
+    AND region IS NOT NULL
+    AND realm_slug IS NOT NULL
+    AND guild_slug IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS guilds_public_browse_idx
-  ON guilds (public_listed, realm_slug, faction, updated_at DESC, id)
+  ON guilds (public_listed, region, realm_slug, faction, updated_at DESC, id)
   WHERE kind = 'guild' AND public_listed = true;
 
 -- Anonymous per-IP rate limits for public GETs (platform#37).

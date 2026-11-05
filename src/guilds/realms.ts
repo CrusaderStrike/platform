@@ -1,45 +1,71 @@
 /**
- * Forever "realm" allowlist for public guild URLs.
+ * Forever "realm" allowlist for public guild URLs, keyed by region.
  *
  * WoW Forever is realmless: players pick a ruleset (Normal / PvP / Roleplaying /
- * Roleplay-PvP / Hardcore) per region, not a classic realm list. Ruleset names
- * repeat across regions, so they are NOT globally unique — uniqueness is
- * (region, ruleset). Our public path `/g/{realm_slug}/{guild_slug}` has no
- * region segment; we still require realm_slug ∈ this allowlist and enforce
- * UNIQUE (realm_slug, guild_slug) ourselves.
+ * Roleplay-PvP / Hardcore) per region. Ruleset names repeat across regions, so
+ * public identity is (region, realm_slug, guild_slug).
  *
- * Mock Blizzard fixtures use Emberfall / Everlook; those stay for tests + demos.
+ * Mock Blizzard fixtures use Emberfall / Everlook (US only for tests/demos).
  */
+
+import type { BlizzardRegion } from '../blizzard/regions.js';
+import { BLIZZARD_REGION_CODES } from '../blizzard/regions.js';
 
 export type ForeverRealm = {
   slug: string;
   name: string;
 };
 
-const REALMS: ForeverRealm[] = [
-  // Rulesets (Blizzard Forever launch set)
+const RULESETS: ForeverRealm[] = [
   { slug: 'normal', name: 'Normal' },
   { slug: 'pvp', name: 'PvP' },
   { slug: 'roleplaying', name: 'Roleplaying' },
   { slug: 'roleplay-pvp', name: 'Roleplay-PvP' },
   { slug: 'hardcore', name: 'Hardcore' },
-  // Mock / fixture realms used by Blizzard mock + tests
+];
+
+const US_MOCKS: ForeverRealm[] = [
   { slug: 'emberfall', name: 'Emberfall' },
   { slug: 'everlook', name: 'Everlook' },
 ];
 
-const BY_SLUG = new Map(REALMS.map((r) => [r.slug, r]));
-
-export function listForeverRealms(): ForeverRealm[] {
-  return REALMS.slice();
+function buildAllowlist(): Map<BlizzardRegion, Map<string, ForeverRealm>> {
+  const out = new Map<BlizzardRegion, Map<string, ForeverRealm>>();
+  for (const region of BLIZZARD_REGION_CODES) {
+    const m = new Map<string, ForeverRealm>();
+    for (const r of RULESETS) m.set(r.slug, r);
+    if (region === 'us') {
+      for (const r of US_MOCKS) m.set(r.slug, r);
+    }
+    out.set(region, m);
+  }
+  return out;
 }
 
-export function getForeverRealm(slug: string): ForeverRealm | undefined {
-  return BY_SLUG.get(slug.toLowerCase());
+const BY_REGION = buildAllowlist();
+
+export function listForeverRealms(region: BlizzardRegion): ForeverRealm[] {
+  return [...(BY_REGION.get(region)?.values() ?? [])];
 }
 
-export function isForeverRealmSlug(slug: string): boolean {
-  return BY_SLUG.has(slug.toLowerCase());
+export function getForeverRealm(
+  region: BlizzardRegion,
+  slug: string,
+): ForeverRealm | undefined {
+  return BY_REGION.get(region)?.get(slug.toLowerCase());
+}
+
+export function isForeverRealmSlug(region: BlizzardRegion, slug: string): boolean {
+  return BY_REGION.get(region)?.has(slug.toLowerCase()) ?? false;
+}
+
+/** True if slug appears in any region's allowlist (list filter without region). */
+export function isForeverRealmSlugAny(slug: string): boolean {
+  const s = slug.toLowerCase();
+  for (const m of BY_REGION.values()) {
+    if (m.has(s)) return true;
+  }
+  return false;
 }
 
 /** kebab-case slug shape shared by realm_slug and guild_slug. */

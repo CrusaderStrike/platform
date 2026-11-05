@@ -1,8 +1,17 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from '../db/pool.js';
 import { AppError } from '../lib/errors.js';
-import { isForeverRealmSlug, isValidSlug } from '../guilds/realms.js';
-import { checkPublicRateLimit, clearPublicRateLimits, type PublicRateBucket } from '../guilds/rate-limit.js';
+import { isBlizzardRegion, type BlizzardRegion } from '../blizzard/regions.js';
+import {
+  isForeverRealmSlug,
+  isForeverRealmSlugAny,
+  isValidSlug,
+} from '../guilds/realms.js';
+import {
+  checkPublicRateLimit,
+  clearPublicRateLimits,
+  type PublicRateBucket,
+} from '../guilds/rate-limit.js';
 import * as guilds from '../guilds/store.js';
 
 export type PublicGuildDeps = { pool: Pool };
@@ -16,7 +25,10 @@ function clientIp(req: FastifyRequest): string {
   return req.ip || 'unknown';
 }
 
-function setRateHeaders(reply: FastifyReply, rate: Awaited<ReturnType<typeof checkPublicRateLimit>>): void {
+function setRateHeaders(
+  reply: FastifyReply,
+  rate: Awaited<ReturnType<typeof checkPublicRateLimit>>,
+): void {
   reply.header('RateLimit-Limit', String(rate.limit));
   reply.header('RateLimit-Remaining', String(rate.remaining));
   reply.header('RateLimit-Reset', String(rate.resetSec));
@@ -40,9 +52,37 @@ function parseLimit(raw: unknown, def: number, max: number): number {
   if (raw === undefined || raw === null || raw === '') return def;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > max) {
-    throw new AppError(400, 'validation_error', 'Invalid limit.', { limit: `Must be an integer 1..${max}.` });
+    throw new AppError(400, 'validation_error', 'Invalid limit.', {
+      limit: `Must be an integer 1..${max}.`,
+    });
   }
   return n;
+}
+
+/** Fastify may give string | string[] for repeated query keys. */
+function queryValues(raw: unknown): string[] {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (Array.isArray(raw)) return raw.map(String).filter((s) => s.length > 0);
+  return [String(raw)].filter((s) => s.length > 0);
+}
+
+function parseRegionFilter(raw: unknown): BlizzardRegion[] | undefined {
+  const values = queryValues(raw).map((v) => v.toLowerCase());
+  if (values.length === 0) return undefined;
+  const out: BlizzardRegion[] = [];
+  const seen = new Set<string>();
+  for (const v of values) {
+    if (!isBlizzardRegion(v)) {
+      throw new AppError(400, 'validation_error', 'Invalid region.', {
+        region: 'Must be us, eu, kr, or tw (lowercase).',
+      });
+    }
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
 }
 
 function maybe304(req: FastifyRequest, reply: FastifyReply, etag: string): boolean {
@@ -71,7 +111,7 @@ export async function registerPublicGuildRoutes(
 ): Promise<void> {
   const { pool } = deps;
 
-  // Sitemap MUST be registered before /:realm_slug/:guild_slug
+  // Sitemap MUST be registered before /:region/:realm_slug/:guild_slug
   app.get('/api/v1/public/guilds/sitemap', async (req, reply) => {
     await enforceRate(pool, req, reply, 'sitemap');
     const q = req.query as Record<string, unknown>;
@@ -82,12 +122,15 @@ export async function registerPublicGuildRoutes(
       page = await guilds.listPublicSitemap(pool, { cursor, limit });
     } catch (err) {
       if (err instanceof Error && err.message === 'bad_cursor') {
-        throw new AppError(400, 'validation_error', 'Invalid cursor.', { cursor: 'Invalid cursor.' });
+        throw new AppError(400, 'validation_error', 'Invalid cursor.', {
+          cursor: 'Invalid cursor.',
+        });
       }
       throw err;
     }
     const body = {
       items: page.items.map((i) => ({
+        region: i.region,
         realm_slug: i.realm_slug,
         guild_slug: i.guild_slug,
         updated_at: i.updated_at.toISOString(),
@@ -109,15 +152,28 @@ export async function registerPublicGuildRoutes(
     const q = req.query as Record<string, unknown>;
     const limit = parseLimit(q.limit, 25, 50);
     const cursor = typeof q.cursor === 'string' && q.cursor.length > 0 ? q.cursor : undefined;
+    const regions = parseRegionFilter(q.region);
 
     let realm: string | undefined;
     if (typeof q.realm === 'string' && q.realm.length > 0) {
-      if (!isValidSlug(q.realm) || !isForeverRealmSlug(q.realm)) {
+      const slug = q.realm.toLowerCase();
+      if (!isValidSlug(slug)) {
         throw new AppError(400, 'validation_error', 'Unknown or invalid realm.', {
           realm: 'Must be a known Forever realm slug.',
         });
       }
-      realm = q.realm.toLowerCase();
+      // If region filter present, realm must be valid in at least one selected region;
+      // otherwise any-region allowlist.
+      const ok =
+        regions && regions.length > 0
+          ? regions.some((r) => isForeverRealmSlug(r, slug))
+          : isForeverRealmSlugAny(slug);
+      if (!ok) {
+        throw new AppError(400, 'validation_error', 'Unknown or invalid realm.', {
+          realm: 'Must be a known Forever realm slug for the selected region(s).',
+        });
+      }
+      realm = slug;
     }
 
     let faction: 'alliance' | 'horde' | undefined;
@@ -153,6 +209,7 @@ export async function registerPublicGuildRoutes(
     let page;
     try {
       page = await guilds.listPublicGuilds(pool, {
+        regions,
         realm,
         faction,
         role,
@@ -162,7 +219,9 @@ export async function registerPublicGuildRoutes(
       });
     } catch (err) {
       if (err instanceof Error && err.message === 'bad_cursor') {
-        throw new AppError(400, 'validation_error', 'Invalid cursor.', { cursor: 'Invalid cursor.' });
+        throw new AppError(400, 'validation_error', 'Invalid cursor.', {
+          cursor: 'Invalid cursor.',
+        });
       }
       throw err;
     }
@@ -181,15 +240,18 @@ export async function registerPublicGuildRoutes(
     return body;
   });
 
-  app.get<{ Params: { realm_slug: string; guild_slug: string } }>(
-    '/api/v1/public/guilds/:realm_slug/:guild_slug',
+  app.get<{ Params: { region: string; realm_slug: string; guild_slug: string } }>(
+    '/api/v1/public/guilds/:region/:realm_slug/:guild_slug',
     async (req, reply) => {
       await enforceRate(pool, req, reply, 'list_detail');
-      const { realm_slug, guild_slug } = req.params;
-      if (!isValidSlug(realm_slug) || !isValidSlug(guild_slug)) {
+      const regionRaw = req.params.region.toLowerCase();
+      const realm_slug = req.params.realm_slug.toLowerCase();
+      const guild_slug = req.params.guild_slug.toLowerCase();
+      // Bad path values → 404 (same as private/unknown; no existence leak).
+      if (!isBlizzardRegion(regionRaw) || !isValidSlug(realm_slug) || !isValidSlug(guild_slug)) {
         throw new AppError(404, 'not_found', 'Guild not found.');
       }
-      const row = await guilds.getPublicGuild(pool, realm_slug.toLowerCase(), guild_slug.toLowerCase());
+      const row = await guilds.getPublicGuild(pool, regionRaw, realm_slug, guild_slug);
       if (!row) {
         throw new AppError(404, 'not_found', 'Guild not found.');
       }
@@ -200,7 +262,6 @@ export async function registerPublicGuildRoutes(
     },
   );
 
-  // Test helper — clear anonymous rate limits between cases
   if (process.env.NODE_ENV === 'test') {
     app.post('/api/v1/public/_test/clear-rate-limits', async () => {
       await clearPublicRateLimits(pool);

@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from '../db/pool.js';
 import { createHash } from 'node:crypto';
+import type { BlizzardRegion } from '../blizzard/regions.js';
 import { getForeverRealm, isForeverRealmSlug, isValidSlug } from './realms.js';
 
 export type Db = Pool | PoolClient;
@@ -7,6 +8,7 @@ export type Db = Pool | PoolClient;
 export type PublicGuildRow = {
   id: string;
   name: string;
+  region: BlizzardRegion;
   realm_slug: string;
   realm_name: string;
   guild_slug: string;
@@ -25,6 +27,7 @@ export type PublicGuildRow = {
 };
 
 export type ListFilters = {
+  regions?: BlizzardRegion[];
   realm?: string;
   faction?: 'alliance' | 'horde';
   role?: 'tank' | 'healer' | 'dps';
@@ -82,8 +85,9 @@ function mapRow(r: PublicGuildRow): PublicGuildRow {
 }
 
 export function toSummary(row: PublicGuildRow) {
-  const realm = getForeverRealm(row.realm_slug);
+  const realm = getForeverRealm(row.region, row.realm_slug);
   return {
+    region: row.region,
     realm_slug: row.realm_slug,
     realm_name: row.realm_name || realm?.name || row.realm_slug,
     guild_slug: row.guild_slug,
@@ -104,10 +108,13 @@ export function toDetail(row: PublicGuildRow) {
     raid_timezone: row.raid_timezone ?? 'UTC',
     contact: row.contact ?? { type: 'in_game', value: row.name },
     member_count: row.public_member_count ?? 0,
-    // v1: force null like gear icon_url until host allowlist lands
     emblem_url: null as string | null,
   };
 }
+
+const SELECT_COLS = `id, name, region, realm_slug, realm_name, guild_slug, faction, recruiting,
+            open_roles, pitch, recruiting_needs, raid_schedule, raid_timezone,
+            contact, public_member_count, emblem_url, updated_at, version`;
 
 export async function listPublicGuilds(
   db: Db,
@@ -116,6 +123,10 @@ export async function listPublicGuilds(
   const where: string[] = [`kind = 'guild'`, `public_listed = true`];
   const params: unknown[] = [];
 
+  if (filters.regions && filters.regions.length > 0) {
+    params.push(filters.regions);
+    where.push(`region = ANY($${params.length}::text[])`);
+  }
   if (filters.realm) {
     params.push(filters.realm);
     where.push(`realm_slug = $${params.length}`);
@@ -159,9 +170,7 @@ export async function listPublicGuilds(
 
   params.push(filters.limit + 1);
   const res = await db.query<PublicGuildRow>(
-    `SELECT id, name, realm_slug, realm_name, guild_slug, faction, recruiting,
-            open_roles, pitch, recruiting_needs, raid_schedule, raid_timezone,
-            contact, public_member_count, emblem_url, updated_at, version
+    `SELECT ${SELECT_COLS}
      FROM guilds
      WHERE ${where.join(' AND ')}
      ORDER BY updated_at DESC, id DESC
@@ -180,22 +189,22 @@ export async function listPublicGuilds(
 
 export async function getPublicGuild(
   db: Db,
+  region: BlizzardRegion,
   realmSlug: string,
   guildSlug: string,
 ): Promise<PublicGuildRow | null> {
   if (!isValidSlug(realmSlug) || !isValidSlug(guildSlug)) return null;
-  if (!isForeverRealmSlug(realmSlug)) return null;
+  if (!isForeverRealmSlug(region, realmSlug)) return null;
   const res = await db.query<PublicGuildRow>(
-    `SELECT id, name, realm_slug, realm_name, guild_slug, faction, recruiting,
-            open_roles, pitch, recruiting_needs, raid_schedule, raid_timezone,
-            contact, public_member_count, emblem_url, updated_at, version
+    `SELECT ${SELECT_COLS}
      FROM guilds
      WHERE kind = 'guild'
        AND public_listed = true
-       AND realm_slug = $1
-       AND guild_slug = $2
+       AND region = $1
+       AND realm_slug = $2
+       AND guild_slug = $3
      LIMIT 1`,
-    [realmSlug, guildSlug],
+    [region, realmSlug, guildSlug],
   );
   return res.rows[0] ? mapRow(res.rows[0]) : null;
 }
@@ -204,7 +213,13 @@ export async function listPublicSitemap(
   db: Db,
   opts: { cursor?: string; limit: number },
 ): Promise<{
-  items: { realm_slug: string; guild_slug: string; updated_at: Date; id: string }[];
+  items: {
+    region: BlizzardRegion;
+    realm_slug: string;
+    guild_slug: string;
+    updated_at: Date;
+    id: string;
+  }[];
   next_cursor: string | null;
 }> {
   const params: unknown[] = [];
@@ -218,11 +233,12 @@ export async function listPublicSitemap(
   params.push(opts.limit + 1);
   const res = await db.query<{
     id: string;
+    region: BlizzardRegion;
     realm_slug: string;
     guild_slug: string;
     updated_at: Date;
   }>(
-    `SELECT id, realm_slug, guild_slug, updated_at
+    `SELECT id, region, realm_slug, guild_slug, updated_at
      FROM guilds
      WHERE ${where.join(' AND ')}
      ORDER BY updated_at DESC, id DESC

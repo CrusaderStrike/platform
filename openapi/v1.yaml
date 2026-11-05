@@ -326,10 +326,16 @@ paths:
       summary: Browse public Forever guilds (platform#37)
       security: []
       parameters:
+        - name: region
+          in: query
+          description: Forever region filter (repeatable; OR). Lowercase us|eu|kr|tw.
+          schema: { type: string, enum: [us, eu, kr, tw] }
+          style: form
+          explode: true
         - name: realm
           in: query
           schema: { type: string, maxLength: 48 }
-          description: Forever realm slug (kebab-case allowlist).
+          description: Forever realm slug (kebab-case allowlist for selected region).
         - name: faction
           in: query
           schema: { type: string, enum: [alliance, horde] }
@@ -393,13 +399,18 @@ paths:
         '304': { description: Not modified. }
         '400': { $ref: '#/components/responses/ValidationError' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
-  /public/guilds/{realm_slug}/{guild_slug}:
+  /public/guilds/{region}/{realm_slug}/{guild_slug}:
     get:
       tags: [public]
       operationId: getPublicGuild
       summary: Public guild detail (platform#37)
       security: []
       parameters:
+        - name: region
+          in: path
+          required: true
+          schema: { type: string, enum: [us, eu, kr, tw] }
+          description: Forever region (lowercase). Invalid values → 404.
         - name: realm_slug
           in: path
           required: true
@@ -1296,8 +1307,9 @@ components:
 
     PublicGuildSummary:
       type: object
-      required: [realm_slug, realm_name, guild_slug, name, faction, recruiting, open_roles, updated_at]
+      required: [region, realm_slug, realm_name, guild_slug, name, faction, recruiting, open_roles, updated_at]
       properties:
+        region: { type: string, enum: [us, eu, kr, tw] }
         realm_slug: { type: string }
         realm_name: { type: string }
         guild_slug: { type: string }
@@ -1363,8 +1375,9 @@ components:
           type: array
           items:
             type: object
-            required: [realm_slug, guild_slug, updated_at]
+            required: [region, realm_slug, guild_slug, updated_at]
             properties:
+              region: { type: string, enum: [us, eu, kr, tw] }
               realm_slug: { type: string }
               guild_slug: { type: string }
               updated_at: { type: string, format: date-time }
