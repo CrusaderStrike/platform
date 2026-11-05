@@ -137,6 +137,41 @@ async function assertForeverSlotItem(
   }
 }
 
+/**
+ * Shared Forever + slot-fit predicates for applyOps (/ops and /sync).
+ * One catalog getItem per (itemId) call site: foreverCheck caches the row so fitsSlot
+ * does not re-read when set_slot runs both checks.
+ */
+function foreverSlotChecks(
+  db: Parameters<typeof foreverItems.catalogIsActive>[0],
+  catalogActive: boolean,
+): {
+  foreverCheck: (itemId: number) => Promise<boolean>;
+  fitsSlot: (itemId: number, slot: string) => Promise<boolean>;
+} {
+  const cache = new Map<number, Awaited<ReturnType<typeof foreverItems.getItem>> | undefined>();
+  async function load(itemId: number) {
+    if (!catalogActive) return null;
+    if (cache.has(itemId)) return cache.get(itemId) ?? null;
+    const row = await foreverItems.getItem(db, itemId);
+    cache.set(itemId, row);
+    return row;
+  }
+  return {
+    foreverCheck: async (itemId) => {
+      if (!catalogActive) return true;
+      return (await load(itemId)) != null;
+    },
+    fitsSlot: async (itemId, slot) => {
+      if (!catalogActive) return true;
+      const row = await load(itemId);
+      if (!row) return true; // foreverCheck owns missing-item (runs first for set_slot)
+      const aliases = row.slot_aliases ?? [];
+      return row.slot === slot || aliases.includes(slot);
+    },
+  };
+}
+
 function parseSlotsMap(raw: unknown): Record<string, number | null> | undefined {
   if (raw === undefined) return undefined;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -644,16 +679,15 @@ export async function registerGearListRoutes(
       requireDisplayedCharacter(selection, list.character_id);
 
       const catalogActive = await foreverItems.catalogIsActive(client);
+      const checks = foreverSlotChecks(client, catalogActive);
       const result = await gear.applyOps(client, {
         list,
         ops,
         defaultSource: 'web',
         actor,
         ignored,
-        foreverCheck: async (itemId) => {
-          if (!catalogActive) return true;
-          return foreverItems.itemExists(client, itemId);
-        },
+        foreverCheck: checks.foreverCheck,
+        fitsSlot: checks.fitsSlot,
       });
       const fresh = await gear.getList(client, listId);
       const items = await gear.getItems(client, listId);
@@ -788,16 +822,15 @@ export async function registerGearListRoutes(
           }
 
           const catalogActive = await foreverItems.catalogIsActive(client);
+          const checks = foreverSlotChecks(client, catalogActive);
           const result = await gear.applyOps(client, {
             list,
             ops: entry.ops,
             defaultSource: envelope.source,
             actor,
             ignored: entry.ignored,
-            foreverCheck: async (itemId) => {
-              if (!catalogActive) return true;
-              return foreverItems.itemExists(client, itemId);
-            },
+            foreverCheck: checks.foreverCheck,
+            fitsSlot: checks.fitsSlot,
           });
           const events = await gear.listEvents(client, {
             listId: list.id,

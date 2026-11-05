@@ -48,6 +48,8 @@ export const OP_TYPES = [
   'remove_item',
   'reprioritize_item',
   'mark_obtained',
+  'set_slot',
+  'clear_slot',
 ] as const;
 export type OpType = (typeof OP_TYPES)[number];
 
@@ -119,7 +121,7 @@ const opBodySchema = z
     list_id: uuid.optional(),
     type: z.enum(OP_TYPES),
     slot: slotSchema,
-    item_id: z.number().int().positive(),
+    item_id: z.number().int().positive().optional(),
     priority: z.number().int().min(1).max(MAX_PRIORITY).optional(),
     note: z.string().max(MAX_NOTE).optional(),
     obtained: z.boolean().optional(),
@@ -128,6 +130,15 @@ const opBodySchema = z
     client_ts: z.string().datetime({ offset: true }).optional(),
   })
   .superRefine((op, ctx) => {
+    const needsItem =
+      op.type === 'add_item' ||
+      op.type === 'remove_item' ||
+      op.type === 'reprioritize_item' ||
+      op.type === 'mark_obtained' ||
+      op.type === 'set_slot';
+    if (needsItem && op.item_id == null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'item_id required', path: ['item_id'] });
+    }
     if (op.type === 'add_item' || op.type === 'reprioritize_item') {
       if (op.priority == null) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'priority required', path: ['priority'] });
