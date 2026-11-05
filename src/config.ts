@@ -63,6 +63,12 @@ const envSchema = z.object({
    * Integer 1..3650. Default 30. See docs/runbook.md § gear_op_noop_ids retention.
    */
   GEAR_OP_NOOP_RETENTION_DAYS: z.string().optional(),
+  /**
+   * Short git sha baked at image build (Dockerfile ARG/ENV BUILD_SHA).
+   * Exposed only on /healthz — never log or return other build metadata.
+   * Validated once at loadConfig: must match ^[0-9a-f]{7,40}$ or becomes "unknown".
+   */
+  BUILD_SHA: z.string().optional(),
 });
 
 export type Config = {
@@ -94,6 +100,8 @@ export type Config = {
   trustProxy: boolean | string[];
   /** Days to retain gear_op_noop_ids rows (validated 1..3650). */
   GEAR_OP_NOOP_RETENTION_DAYS: number;
+  /** Short deploy sha for /healthz ("unknown" if unset or invalid). */
+  BUILD_SHA: string;
 };
 
 function isProdEnv(nodeEnv: string, appEnv?: string): boolean {
@@ -107,6 +115,13 @@ export function parseTrustedProxy(raw: string | undefined): boolean | string[] {
   if (!v || v === 'false' || v === '0' || v.toLowerCase() === 'no') return false;
   if (v === 'true' || v === '1' || v.toLowerCase() === 'yes') return true;
   return v.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Accept only lowercase hex git shas for public /healthz (7–40 chars). */
+export function normalizeBuildSha(raw: string | undefined): string {
+  const s = (raw ?? '').trim();
+  if (/^[0-9a-f]{7,40}$/.test(s)) return s;
+  return 'unknown';
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -221,5 +236,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure,
     trustProxy,
     GEAR_OP_NOOP_RETENTION_DAYS: gearOpNoopRetentionDays,
+    BUILD_SHA: normalizeBuildSha(v.BUILD_SHA),
   };
 }

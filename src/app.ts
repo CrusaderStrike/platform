@@ -76,8 +76,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     });
   });
 
-  app.get('/healthz', async () => ({ ok: true }));
-  app.get('/api/v1/healthz', async () => ({ ok: true }));
+  // Deploy identity only — never attach env, version strings, or other build metadata.
+  const healthz = () => ({ ok: true as const, sha: opts.config.BUILD_SHA });
+  app.get('/healthz', async () => healthz());
+  app.get('/api/v1/healthz', async () => healthz());
 
   const redirectUri = opts.redirectUri ?? opts.config.BLIZZARD_REDIRECT_URI;
 

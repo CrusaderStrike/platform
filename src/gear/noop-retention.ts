@@ -65,6 +65,7 @@ type PruneFn = (db: Db, opts?: PruneNoopOpts) => Promise<PruneNoopResult>;
 async function defaultPrune(db: Db, opts?: PruneNoopOpts): Promise<PruneNoopResult> {
   const days = opts?.retentionDays ?? resolveRetentionDays(process.env.GEAR_OP_NOOP_RETENTION_DAYS);
   const limit = opts?.limit ?? GEAR_OP_NOOP_PRUNE_BATCH;
+  // SQL fn silently clamps days to <=3650 and limit to <=100000 (raises only if < 1).
 
   const r = await db.query<{ prune_gear_op_noop_ids: number }>(
     `SELECT public.prune_gear_op_noop_ids($1::int, $2::int) AS prune_gear_op_noop_ids`,

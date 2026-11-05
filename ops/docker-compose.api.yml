@@ -1,10 +1,18 @@
 # Production API — joins existing crusaderstrike_default with postgres + caddy.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d
+# Pass short git sha at build so /healthz.sha matches the image (baked into ENV BUILD_SHA).
+# Prod (runbook): require the var — `BUILD_SHA=$(git … rev-parse --short HEAD)` then
+#   `docker compose … build api` with compose arg `${BUILD_SHA:?set BUILD_SHA to short git sha}`.
+# Local/dev may use the default below. Do not set BUILD_SHA under environment: — that would
+# override the image bake with a host value (including accidental secrets).
 services:
   api:
     build:
       context: ./platform
       dockerfile: Dockerfile
+      args:
+        # Prod runbook uses ${BUILD_SHA:?…}; default here is for local compose only.
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     image: crusaderstrike-api:local
     restart: unless-stopped
     env_file:
