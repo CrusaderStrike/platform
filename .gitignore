@@ -1,21 +1,8 @@
-# Secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-secrets/
-credentials*.json
-*.token
-# OS / editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-*.log
-# Node / build
 node_modules/
 dist/
-build/
+.env
+.env.local
 coverage/
+*.log
+.pg-data/
+.tmp/

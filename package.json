@@ -1,0 +1,39 @@
+{
+  "name": "@crusaderstrike/platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crusader Strike platform API (WoW Forever only)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "migrate": "tsx src/db/migrate.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint:openapi": "npx --yes @redocly/cli@1 lint openapi/v1.yaml"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.0.1",
+    "fastify": "^5.2.2",
+    "pg": "^8.14.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
+    "embedded-postgres": "^16.15.0-beta.19",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "@embedded-postgres/linux-x64": true
+  }
+}
