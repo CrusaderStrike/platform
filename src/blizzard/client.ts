@@ -40,6 +40,8 @@ export type BlizzardClient = {
     state: string;
     codeChallenge: string;
     scopes?: string[];
+    /** OIDC-style prompt forwarded to Battle.net when present. */
+    prompt?: 'login';
   }): string;
   exchangeCode(args: { code: string; codeVerifier: string }): Promise<BlizzardTokenResponse>;
   fetchUserInfo(accessToken: string): Promise<BlizzardUserInfo>;
@@ -168,7 +170,7 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
   }
 
   return {
-    buildAuthorizeUrl({ state, codeChallenge, scopes = ['wow.profile', 'openid'] }) {
+    buildAuthorizeUrl({ state, codeChallenge, scopes = ['wow.profile', 'openid'], prompt }) {
       const url = new URL(cfg.authorizeUrl);
       url.searchParams.set('client_id', cfg.clientId);
       url.searchParams.set('scope', scopes.join(' '));
@@ -177,6 +179,7 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('code_challenge', codeChallenge);
       url.searchParams.set('code_challenge_method', 'S256');
+      if (prompt) url.searchParams.set('prompt', prompt);
       return url.toString();
     },
 
