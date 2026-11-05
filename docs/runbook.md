@@ -43,6 +43,56 @@ Check with: `dig +short crusaderstrike.com A`, `dig +short www.crusaderstrike.co
 - Rollback: `git revert <bad sha>` on `main` and push (or run the workflow via `workflow_dispatch` on a known-good SHA). Confirm the Pages deployment finished and the site serves the old version. Do **not** touch the droplet for site content.
 - www TLS: the Pages certificate must cover both `crusaderstrike.com` and `www.crusaderstrike.com` (www redirects to apex). If www TLS breaks (cert lists only the apex), re-set the Pages custom domain in web → Settings → Pages: clear it, save, set `crusaderstrike.com` again and save. That re-issues the cert including www. Wait for "Certificate provisioned", then re-enable "Enforce HTTPS". Confirm the www CNAME still points to `crusaderstrike.github.io`.
 
+
+## API service (first deploy and updates)
+
+Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusaderstrike/docker-compose.api.yml` on the droplet). Image builds from a checkout of this repo at `/opt/crusaderstrike/platform` (commit pinned in `/root/image-digests.log` notes / deploy report).
+
+### First deploy
+1. Ensure DNS `api.crusaderstrike.com` A → `24.199.127.192` (verify with `dig @8.8.8.8` or dns.google; the operator box resolver may lie).
+2. Checkout platform `main` onto the droplet at `/opt/crusaderstrike/platform`.
+3. Copy `ops/docker-compose.api.yml` to `/opt/crusaderstrike/docker-compose.api.yml`.
+4. Create `/opt/crusaderstrike/api.env` (root, mode 0600). Start from `.env.example` keys:
+   - `NODE_ENV=production`, `PORT=3000`
+   - `PUBLIC_WEB_ORIGIN=https://crusaderstrike.com`, `PUBLIC_API_ORIGIN=https://api.crusaderstrike.com`
+   - `CORS_ORIGINS=https://crusaderstrike.com,https://www.crusaderstrike.com`
+   - `DATABASE_URL=postgres://crusaderstrike_migrate:<MIGRATE_PASSWORD>@postgres:5432/crusaderstrike`  
+     (migrate role: the process runs migrations on boot and needs `CREATE`. Split to `crusaderstrike_app` once an entrypoint separates migrate from serve.)
+   - `SESSION_SECRET` — generate on the droplet (`openssl rand -hex 32`); never reuse compose examples.
+   - `TOKEN_ENC_KEY` — 64 hex chars (32 bytes). If the vault stores base64, convert with `base64 -d | xxd -p -c 256` on an air-gapped pipe; never print.
+   - `BLIZZARD_MOCK=false`, `BLIZZARD_REGIONS=us`
+   - `BLIZZARD_CLIENT_ID` / `BLIZZARD_CLIENT_SECRET` from Drew's Battle.net client (vault `shared` → `blizzard_api:` tokens).
+   - `BLIZZARD_REDIRECT_URI=https://api.crusaderstrike.com/api/v1/auth/blizzard/callback`
+   Stream vault secrets **drewnix → box → droplet ssh stdin** only. Do not land secrets on the box disk or in argv; the droplet must never reach drewnix.
+5. Caddyfile: reverse-proxy `/healthz` and `/` to `api:3000`. CORS must include `Access-Control-Expose-Headers: Retry-After`. Back up first:  
+   `cp -p caddy/Caddyfile caddy/Caddyfile.bak-$(date +%Y%m%d%H%M%S)`, validate, then `docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
+6. Build & start:
+   ```
+   cd /opt/crusaderstrike
+   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
+   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d caddy
+   docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+   ```
+7. Smoke:
+   - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true}`
+   - `curl -sI https://api.crusaderstrike.com/api/v1/auth/blizzard/login` → 302 to `https://oauth.battle.net/authorize` with `client_id`, `redirect_uri`, `scope=wow.profile openid`, `state`, PKCE (`code_challenge` + `S256`). Compare `client_id` by hash only.
+   - Throwaway: `docker run --rm --env-file api.env -e BLIZZARD_MOCK=true -e NODE_ENV=production --network crusaderstrike_default crusaderstrike-api:local …` must refuse to load config.
+   - 429 from `POST /api/v1/me/characters/refresh` (when rate-limited) includes `Retry-After` and CORS exposes it.
+   - `docker logs crusaderstrike-api-1` must not contain secrets.
+8. Confirm backup crons still present: `/etc/cron.d/crusaderstrike-backup`, `/etc/cron.d/crusaderstrike-offsite-backup`.
+
+### Restart / rebuild API only
+```
+cd /opt/crusaderstrike
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
+curl -fsS https://api.crusaderstrike.com/healthz
+```
+
+### Env file location
+`/opt/crusaderstrike/api.env` (root, 0600). Postgres passwords stay in `/opt/crusaderstrike/.env`; do not merge the files.
+
 ## Deploy and restart (API droplet)
 Before pulling, record the current image digests so you can roll back, and take a fresh backup before anything that touches Postgres:
 ```
