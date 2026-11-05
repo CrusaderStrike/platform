@@ -21,16 +21,19 @@ DNS is hosted at Lithium (`ns1.lithiumdns.net`, `ns2.lithiumdns.net`).
 Check with: `dig +short crusaderstrike.com A`, `dig +short www.crusaderstrike.com CNAME`, `dig +short api.crusaderstrike.com A`.
 
 ### API CORS
-- Allowed origins: `https://crusaderstrike.com` and `https://www.crusaderstrike.com` (both are first-class origins). No other origin gets CORS headers.
-- Applied in `caddy/Caddyfile` (matcher `@cors_origin`) on every API path, including `/healthz`: `Access-Control-Allow-Origin` reflects the request origin, `Vary: Origin`, methods `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Content-Type, X-CSRF-Token`, max-age 600. Preflight `OPTIONS` from an allowed origin gets `204` at Caddy.
-- Signup (`POST /signups`) is uncredentialed. When auth/session goes live, add `Access-Control-Allow-Credentials: true` (never with `*`). Caddy and the app must stay in sync; if the app later sets CORS itself, remove it from Caddy so headers are not duplicated.
-- **Expose `Retry-After`:** the Fastify app sets `Access-Control-Expose-Headers: Retry-After` so the browser can read the 429 countdown on `POST /api/v1/me/characters/refresh`. If CORS headers are still emitted from the droplet `caddy/Caddyfile`, add the matching expose header there too, e.g. `Access-Control-Expose-Headers Retry-After` (or append to an existing expose list). Keep Caddy and the app in sync; do not leave expose only on one layer. (Documented here for the next Caddy edit — do not change the live droplet from this PR alone.)
-- Check:
+- **The Fastify app owns CORS.** `@fastify/cors` in `src/app.ts` reflects allowlisted origins from `CORS_ORIGINS` (`https://crusaderstrike.com`, `https://www.crusaderstrike.com`), sets `Access-Control-Allow-Credentials: true`, methods `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Content-Type, X-CSRF-Token, If-Match, Authorization`, and `Access-Control-Expose-Headers: Retry-After` (so credentialed browser JS can read the 429 countdown on `POST /api/v1/me/characters/refresh`). Preflight `OPTIONS` is handled by the app.
+- **Do not set any `Access-Control-*` (or CORS preflight short-circuit) in `caddy/Caddyfile`.** Caddy only terminates TLS and reverse-proxies to `api:3000`. If both layers emit CORS headers, browsers see duplicates (e.g. two `Access-Control-Allow-Origin` values) and reject every credentialed call from the site.
+- Check (each Access-Control header must appear **exactly once**):
   ```
+  # Expect count 1 for each:
+  curl -sI -H 'Origin: https://crusaderstrike.com' https://api.crusaderstrike.com/healthz | grep -ci '^access-control-allow-origin:'
+  curl -sI -H 'Origin: https://www.crusaderstrike.com' https://api.crusaderstrike.com/api/v1/auth/session | grep -ci '^access-control-allow-origin:'
+  curl -sI -H 'Origin: https://crusaderstrike.com' https://api.crusaderstrike.com/healthz | grep -ci '^access-control-expose-headers:'
+  # Expect allow-credentials true, expose Retry-After, ACAO equals Origin:
   curl -sI -H 'Origin: https://crusaderstrike.com' https://api.crusaderstrike.com/healthz | grep -i access-control
-  curl -si -X OPTIONS -H 'Origin: https://www.crusaderstrike.com' -H 'Access-Control-Request-Method: POST' https://api.crusaderstrike.com/signups | head -1   # expect 204
+  curl -si -X OPTIONS -H 'Origin: https://www.crusaderstrike.com' -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: Content-Type, X-CSRF-Token' https://api.crusaderstrike.com/api/v1/auth/session | head -20
   ```
-  Expect `access-control-allow-origin` equal to the Origin sent. An unlisted origin must get no ACAO header.
+  An unlisted origin must get no `Access-Control-Allow-Origin`. Duplicate counts (2+) mean Caddy is still injecting CORS — remove those directives and reload.
 - Agents running: DO metrics agent (`do-agent`) and `droplet-agent` are both active.
 
 ## Access
@@ -46,7 +49,7 @@ Check with: `dig +short crusaderstrike.com A`, `dig +short www.crusaderstrike.co
 
 ## API service (first deploy and updates)
 
-Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusaderstrike/docker-compose.api.yml` on the droplet). Image builds from a checkout of this repo at `/opt/crusaderstrike/platform` (commit pinned in `/root/image-digests.log` notes / deploy report).
+Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusaderstrike/docker-compose.api.yml` on the droplet). Image builds from a checkout of this repo at `/opt/crusaderstrike/platform`. Before every `build api`, append `platform_HEAD` (`git -C /opt/crusaderstrike/platform rev-parse HEAD`) and the current `crusaderstrike-api` image id to `/root/image-digests.log`, and `docker tag crusaderstrike-api:local crusaderstrike-api:prev` for rollback.
 
 ### First deploy
 1. Ensure DNS `api.crusaderstrike.com` A → `24.199.127.192` (verify with `dig @8.8.8.8` or dns.google; the operator box resolver may lie).
@@ -57,61 +60,112 @@ Production compose fragment: `ops/docker-compose.api.yml` (copied to `/opt/crusa
    - `PUBLIC_WEB_ORIGIN=https://crusaderstrike.com`, `PUBLIC_API_ORIGIN=https://api.crusaderstrike.com`
    - `CORS_ORIGINS=https://crusaderstrike.com,https://www.crusaderstrike.com`
    - `DATABASE_URL=postgres://crusaderstrike_migrate:<MIGRATE_PASSWORD>@postgres:5432/crusaderstrike`  
-     (migrate role: the process runs migrations on boot and needs `CREATE`. Split to `crusaderstrike_app` once an entrypoint separates migrate from serve.)
+     (migrate role: the process runs migrations on boot and needs `CREATE`. Split to `crusaderstrike_app` once an entrypoint separates migrate from serve — open a follow-up ticket.)
    - `SESSION_SECRET` — generate on the droplet (`openssl rand -hex 32`); never reuse compose examples.
-   - `TOKEN_ENC_KEY` — 64 hex chars (32 bytes). If the vault stores base64, convert with `base64 -d | xxd -p -c 256` on an air-gapped pipe; never print.
+   - `TOKEN_ENC_KEY` — 64 hex chars (32 bytes). If the vault stores base64, convert with `base64 -d | xxd -p -c 256` on an air-gapped pipe; never print, never a temp file.
    - `BLIZZARD_MOCK=false`, `BLIZZARD_REGIONS=us`
-   - `BLIZZARD_CLIENT_ID` / `BLIZZARD_CLIENT_SECRET` from Drew's Battle.net client (vault `shared` → `blizzard_api:` tokens).
+   - `BLIZZARD_CLIENT_ID` / `BLIZZARD_CLIENT_SECRET` from Drew's Battle.net client (vault `shared` → `blizzard_api:` tokens). Trim trailing commas/whitespace; a trailing comma breaks the OAuth `client_id` query param.
    - `BLIZZARD_REDIRECT_URI=https://api.crusaderstrike.com/api/v1/auth/blizzard/callback`
    Stream vault secrets **drewnix → box → droplet ssh stdin** only. Do not land secrets on the box disk or in argv; the droplet must never reach drewnix.
-5. Caddyfile: reverse-proxy `/healthz` and `/` to `api:3000`. CORS must include `Access-Control-Expose-Headers: Retry-After`. Back up first:  
-   `cp -p caddy/Caddyfile caddy/Caddyfile.bak-$(date +%Y%m%d%H%M%S)`, validate, then `docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
-6. Build & start:
+5. **Pre-build backup + pin current image** (required before every build that can run `migrate()` on boot):
+   ```
+   /usr/local/bin/crusaderstrike-backup
+   mkdir -p /root
+   {
+     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pre-build"
+     echo -n "platform_HEAD "; git -C /opt/crusaderstrike/platform rev-parse HEAD
+     docker inspect --format 'api_image={{.Config.Image}} api_id={{.Image}}' crusaderstrike-api-1 2>/dev/null || echo "api_image=(none yet)"
+     docker inspect --format 'postgres_image={{.Config.Image}} postgres_id={{.Image}}' crusaderstrike-postgres-1
+     docker inspect --format 'caddy_image={{.Config.Image}} caddy_id={{.Image}}' crusaderstrike-caddy-1
+   } >> /root/image-digests.log
+   # Tag the currently running API image for rollback (skip if first deploy / no image yet):
+   docker tag crusaderstrike-api:local crusaderstrike-api:prev 2>/dev/null || true
+   ```
+   Migrations must stay **additive / backward-compatible** so `crusaderstrike-api:prev` can still run against the schema after a forward migration. Non-compatible migrations require a Bot-approved restore via `docs/backups.md`.
+6. Caddyfile: reverse-proxy `/healthz` and `/` to `api:3000`. **No CORS / `Access-Control-*` directives** (the app owns CORS; see Architecture). Back up first, but **do not reload Caddy yet** — start the API first so the proxy target is healthy:
+   `cp -p caddy/Caddyfile caddy/Caddyfile.$(date -u +%Y%m%dT%H%M%SZ).bak`
+7. Build & start the API **before** pointing Caddy at it:
    ```
    cd /opt/crusaderstrike
    docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
    docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
-   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d caddy
+   # Wait until healthy:
+   docker inspect -f '{{.State.Health.Status}}' crusaderstrike-api-1   # expect healthy
+   ```
+8. Point Caddy at the API (edit if needed), validate, reload once:
+   ```
+   docker exec crusaderstrike-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
    docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
    ```
-7. Smoke:
+9. After a successful deploy, append the new pin:
+   ```
+   {
+     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) post-deploy"
+     echo -n "platform_HEAD "; git -C /opt/crusaderstrike/platform rev-parse HEAD
+     docker inspect --format 'api_image={{.Config.Image}} api_id={{.Image}}' crusaderstrike-api-1
+   } >> /root/image-digests.log
+   ```
+10. Smoke:
    - `curl -fsS https://api.crusaderstrike.com/healthz` → 200 `{"ok":true}`
-   - `curl -sI https://api.crusaderstrike.com/api/v1/auth/blizzard/login` → 302 to `https://oauth.battle.net/authorize` with `client_id`, `redirect_uri`, `scope=wow.profile openid`, `state`, PKCE (`code_challenge` + `S256`). Compare `client_id` by hash only.
-   - Throwaway: `docker run --rm --env-file api.env -e BLIZZARD_MOCK=true -e NODE_ENV=production --network crusaderstrike_default crusaderstrike-api:local …` must refuse to load config.
-   - 429 from `POST /api/v1/me/characters/refresh` (when rate-limited) includes `Retry-After` and CORS exposes it.
+   - `curl -sI https://api.crusaderstrike.com/api/v1/auth/blizzard/login` → 302 to `https://oauth.battle.net/authorize` with `client_id`, `redirect_uri`, `scope=wow.profile openid`, `state`, PKCE (`code_challenge` + `S256`). Compare `client_id` by length/hash only; reject a trailing comma in the Location.
+   - `GET /api/v1/auth/session` with no cookie → **401**.
+   - CORS single-header check (Architecture): `grep -ci '^access-control-allow-origin:'` → **1** for both apex and www Origins; `allow-credentials: true`; `expose-headers` includes `Retry-After`.
+   - Preflight: `OPTIONS` with allowed Origin → 204 and the same single CORS set (includes credentials).
+   - Cookie flags (after a real callback in a private window, or from captured `Set-Cookie`): `cs_session` must be `Secure; HttpOnly; SameSite=Lax` and must **not** set `Domain=` (host-only on `api.crusaderstrike.com`).
+   - Throwaway mock refusal (config fails before migrate; use entrypoint override so the container never serves):  
+     `docker run --rm --network crusaderstrike_default --env-file api.env -e BLIZZARD_MOCK=true -e NODE_ENV=production --entrypoint node crusaderstrike-api:local -e "require('./dist/config.js')"`  
+     must exit non-zero / refuse production+mock. Do not pass a command that boots `src/index.ts`.
+   - 429 from `POST /api/v1/me/characters/refresh` (when rate-limited) includes `Retry-After` and CORS exposes it (header appears once).
    - `docker logs crusaderstrike-api-1` must not contain secrets.
-8. Confirm backup crons still present: `/etc/cron.d/crusaderstrike-backup`, `/etc/cron.d/crusaderstrike-offsite-backup`.
+11. Confirm backup crons still present: `/etc/cron.d/crusaderstrike-backup`, `/etc/cron.d/crusaderstrike-offsite-backup`.
 
 ### Restart / rebuild API only
+Always backup + pin + tag `:prev` before `build` (same commands as First deploy step 5). Then:
 ```
 cd /opt/crusaderstrike
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml build api
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
+# wait healthy, then smoke /healthz + CORS single-header check
 curl -fsS https://api.crusaderstrike.com/healthz
 ```
+
+### API rollback
+1. Prefer image rollback when the schema is still backward-compatible with the old code:
+   ```
+   docker tag crusaderstrike-api:prev crusaderstrike-api:local
+   cd /opt/crusaderstrike
+   docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml up -d api
+   ```
+   Or check out the previous SHA under `/opt/crusaderstrike/platform` (from `/root/image-digests.log`) and `build api` + `up -d api`.
+2. If a migration is not backward-compatible, stop and restore through `docs/backups.md` (Bot approval required) before serving old code.
 
 ### Env file location
 `/opt/crusaderstrike/api.env` (root, 0600). Postgres passwords stay in `/opt/crusaderstrike/.env`; do not merge the files.
 
 ## Deploy and restart (API droplet)
-Before pulling, record the current image digests so you can roll back, and take a fresh backup before anything that touches Postgres:
+Before pulling or rebuilding anything that can touch Postgres (including an API rebuild — `migrate()` runs on boot), take a fresh backup and append digests to `/root/image-digests.log`:
 ```
-docker inspect --format '{{.Config.Image}} {{.Image}}' crusaderstrike-postgres-1 crusaderstrike-caddy-1 >> /root/image-digests.log
 /usr/local/bin/crusaderstrike-backup
+{
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pre-change"
+  echo -n "platform_HEAD "; git -C /opt/crusaderstrike/platform rev-parse HEAD 2>/dev/null || true
+  docker inspect --format '{{.Name}} image={{.Config.Image}} id={{.Image}}' crusaderstrike-postgres-1 crusaderstrike-caddy-1 crusaderstrike-api-1 2>/dev/null
+} >> /root/image-digests.log
+docker tag crusaderstrike-api:local crusaderstrike-api:prev 2>/dev/null || true
 ```
 ```
 cd /opt/crusaderstrike
-docker compose -f docker-compose.yml -f docker-compose.caddy.yml ps
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml -f docker-compose.api.yml ps
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml pull
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 docker compose ... restart caddy        # or postgres
 docker compose ... logs --tail=200 caddy
 ```
-After any change, check that `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 and the CORS check under Architecture still passes.
+After any change, check that `curl -fsS https://api.crusaderstrike.com/healthz` returns 200 and the CORS **single-header** check under Architecture still passes.
 
-Rollback: pin the image in the compose file to the previous digest from `/root/image-digests.log` (e.g. `image: caddy@sha256:...`) and `up -d` again.
+Rollback (Caddy/Postgres base images): pin the image in the compose file to the previous digest from `/root/image-digests.log` (e.g. `image: caddy@sha256:...`) and `up -d` again. Rollback (API): see **API rollback** above (`:prev` tag or previous SHA).
 
-Caddyfile changes: back up first (`cp -p caddy/Caddyfile caddy/Caddyfile.bak-$(date +%Y%m%d%H%M%S)`), edit, then `docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`. To roll back, copy the backup over and reload.
+Caddyfile changes: back up first (`cp -p caddy/Caddyfile caddy/Caddyfile.$(date -u +%Y%m%dT%H%M%SZ).bak`), edit (**no CORS headers**), validate, then `docker exec crusaderstrike-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`. To roll back, copy the backup over, validate, and reload.
 
 ## Backups
 - Cron: `/etc/cron.d/crusaderstrike-backup` runs `0 3 * * * root /usr/local/bin/crusaderstrike-backup` and logs to `/var/log/crusaderstrike-backup.log`. Times are UTC (7 PM PST or 8 PM PDT).
@@ -175,7 +229,7 @@ Caddyfile changes: back up first (`cp -p caddy/Caddyfile caddy/Caddyfile.bak-$(d
 | Caddy or cert error | `/healthz` fails, cert date, `logs caddy` | Restart caddy. Check DNS and ports 80 and 443. Watch for Let's Encrypt rate limits. |
 | High CPU or memory | `top`, `docker stats`, DO graphs | Find the busy container and restart it. If it keeps happening, propose a resize (paid) through Bot. |
 | Site up on apex, www TLS/DNS broken | `curl -vI https://www.crusaderstrike.com`, `dig www.crusaderstrike.com CNAME` | Make sure www is a CNAME to `crusaderstrike.github.io`, then re-set the Pages custom domain to re-issue the cert (see Website). |
-| Browser CORS error from the site | CORS check under Architecture | Confirm the `@cors_origin` block in the Caddyfile lists both origins, then reload Caddy. |
+| Browser CORS error from the site | CORS check under Architecture (`grep -ci` ACAO → 1) | Confirm the **app** allowlist (`CORS_ORIGINS` in `api.env`) lists both origins. If ACAO appears twice, remove `Access-Control-*` from `caddy/Caddyfile`, validate, and reload Caddy. |
 | Droplet unreachable | DO console, droplet status | Power cycle from the DO console, with approval. |
 
 
