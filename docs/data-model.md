@@ -68,7 +68,7 @@ This document covers the parts of platform#2 that platform#17 needs (guild stub 
 
 **`gear_list_items`:** PK `(list_id, slot, item_id)`; columns `guild_id`, `priority`, `note`, `obtained`, `obtained_at`.
 
-**`gear_op_noop_ids`:** PK `(guild_id, idempotency_key)`; columns `list_id`, `recorded_at`. Markers for no-op `set_slot`/`clear_slot` (no event / no version bump). **Retention: 30 days** — see runbook § gear_op_noop_ids retention (platform#47).
+**`gear_op_noop_ids`:** PK `(guild_id, idempotency_key)`; columns `list_id`, `recorded_at`. Markers for no-op `set_slot`/`clear_slot` (no event / no version bump). **Retention:** `GEAR_OP_NOOP_RETENTION_DAYS` (default 30). Post-expiry retries re-evaluate (`base_version` still guards). Prune via `prune_gear_op_noop_ids()` SECURITY DEFINER — see runbook § gear_op_noop_ids retention (platform#47).
 
 Projection rule: every successful command appends one or more events and updates these tables in the **same** transaction. `GearOpRejected` appends to the log but does not change item rows (except as documented for conflict recording).
 

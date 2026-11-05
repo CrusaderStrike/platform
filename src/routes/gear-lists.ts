@@ -20,6 +20,7 @@ import {
   validateSetLevelRules,
 } from '../gear/set-meta.js';
 import * as foreverItems from '../items/store.js';
+import { scheduleWritePathNoopPrune } from '../gear/noop-retention.js';
 
 export type GearListDeps = { pool: Pool };
 
@@ -692,6 +693,8 @@ export async function registerGearListRoutes(
       const fresh = await gear.getList(client, listId);
       const items = await gear.getItems(client, listId);
       await client.query('COMMIT');
+      // After COMMIT only — prune must never abort the write txn (platform#47 / #48 review).
+      scheduleWritePathNoopPrune(pool);
       return {
         version: result.version,
         applied: result.applied,
@@ -865,6 +868,8 @@ export async function registerGearListRoutes(
         }
       }
       await client.query('COMMIT');
+      // After COMMIT only — prune must never abort the write txn (platform#47 / #48 review).
+      scheduleWritePathNoopPrune(pool);
       return {
         character_id: owned.id,
         source: envelope.source,

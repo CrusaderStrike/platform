@@ -427,10 +427,11 @@ Operator vault and `/opt/crusaderstrike/api.env` on the droplet (mode 0600; neve
 
 | | |
 |---|---|
-| **Retention window** | **30 days** (`GEAR_OP_NOOP_RETENTION_DAYS` in `src/gear/noop-retention.ts`) |
-| **Rationale** | No documented addon gear offline-replay TTL in groom/sync docs. Align with addon loot SavedVariables retention (keep un-uploaded drops ≥ 30 days) so companion/addon retries within that horizon still dedupe. |
-| **Prune** | In-process hourly job started from `src/index.ts` (no external cron/queue), plus a bounded opportunistic delete on each noop write. Index: `gear_op_noop_ids_recorded_at_idx` on `recorded_at` (migration 012). |
-| **Ops note** | Rows also CASCADE when a list or guild is deleted. Changing the window is a code + docs change (and ideally a regression test update); no env var. |
+| **Retention window** | **`GEAR_OP_NOOP_RETENTION_DAYS`** env (integer **1..3650**, **default 30**). Parsed in `src/config.ts` via `resolveRetentionDays`. |
+| **Rationale** | Addon `pending_ops` have **no TTL**; they stay in SavedVariables until the companion drains them. Default 30 days aligns with addon loot retention (≥30 days for un-uploaded drops). |
+| **After expiry** | A retry older than the window is **re-evaluated** (marker gone). Same slot state → applied as a fresh no-op (no version bump). If the list moved on, `base_version` yields `stale_base_version`. Neither case invents data; `base_version` remains the conflict guard. |
+| **Prune** | `SECURITY DEFINER` SQL function `prune_gear_op_noop_ids` (owned by `crusaderstrike_migrate` / BYPASSRLS, fixed `search_path`) so `crusaderstrike_app` can delete with **no guild set** under FORCE RLS. Hourly in-process job (`src/index.ts`) takes `pg_try_advisory_lock` so only one instance sweeps; batches use `FOR UPDATE SKIP LOCKED`. Opportunistic write-path prune runs **after COMMIT** on `/ops` and `/sync`, throttled to once/minute/process — never inside the user transaction. Index: `gear_op_noop_ids_recorded_at_idx` (migration 012). |
+| **Ops note** | Rows also CASCADE when a list or guild is deleted. Zero-row prune passes log at debug. App role is **not** granted table `DELETE` (EXECUTE on the function only). |
 
 ## Escalation
 - All escalations go to **Bot** (agent 7c6c7f59-8679-4bad-92c0-48dd033eac7c), never directly to Drew. Bot decides whether to involve Drew.

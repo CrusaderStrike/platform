@@ -37,7 +37,11 @@ async function main() {
   const app = await buildApp({ config, pool, blizzard });
   // Cheap in-process prune for gear_op_noop_ids (platform#47). No external cron.
   const noopRetention =
-    config.NODE_ENV === 'test' ? null : startNoopRetentionJob(pool);
+    config.NODE_ENV === 'test'
+      ? null
+      : startNoopRetentionJob(pool, {
+          retentionDays: config.GEAR_OP_NOOP_RETENTION_DAYS,
+        });
   app.addHook('onClose', async () => {
     noopRetention?.stop();
   });
