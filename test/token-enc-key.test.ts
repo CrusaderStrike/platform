@@ -111,3 +111,62 @@ describe('stored token v1: prefix (#66)', () => {
     expect(decryptSecret(enc, PROD_SAFE_TOKEN_ENC_KEY)).toBe('tok');
   });
 });
+
+describe('token AEAD properties (#70)', () => {
+  it('two encryptions of the same plaintext produce different ciphertext (nonce uniqueness)', () => {
+    const a = encryptSecret('same-plaintext', PROD_SAFE_TOKEN_ENC_KEY);
+    const b = encryptSecret('same-plaintext', PROD_SAFE_TOKEN_ENC_KEY);
+    expect(a).not.toBe(b);
+    // Both must still decrypt to the original plaintext.
+    expect(decryptSecret(a, PROD_SAFE_TOKEN_ENC_KEY)).toBe('same-plaintext');
+    expect(decryptSecret(b, PROD_SAFE_TOKEN_ENC_KEY)).toBe('same-plaintext');
+    // IV (first segment after v1:) must differ when the nonce is random.
+    const ivA = a.slice('v1:'.length).split('.')[0];
+    const ivB = b.slice('v1:'.length).split('.')[0];
+    expect(ivA).not.toBe(ivB);
+  });
+
+  it.each(['tag', 'ciphertext'] as const)(
+    'flipping a byte in the %s yields decrypt_failed',
+    (part) => {
+      const enc = encryptSecret('tok', PROD_SAFE_TOKEN_ENC_KEY);
+      const body = enc.slice('v1:'.length);
+      const [ivB64, tagB64, dataB64] = body.split('.');
+      expect(ivB64 && tagB64 && dataB64).toBeTruthy();
+
+      const flipFirstByte = (b64url: string): string => {
+        const buf = Buffer.from(b64url, 'base64url');
+        buf[0] = (buf[0]! ^ 0xff) & 0xff;
+        return buf.toString('base64url');
+      };
+
+      const tamperedBody =
+        part === 'tag'
+          ? `${ivB64}.${flipFirstByte(tagB64!)}.${dataB64}`
+          : `${ivB64}.${tagB64}.${flipFirstByte(dataB64!)}`;
+      const tampered = `v1:${tamperedBody}`;
+
+      try {
+        decryptSecret(tampered, PROD_SAFE_TOKEN_ENC_KEY);
+        throw new Error('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(TokenDecryptError);
+        expect((err as TokenDecryptError).code).toBe('decrypt_failed');
+        expect((err as Error).message).not.toContain(PROD_SAFE_TOKEN_ENC_KEY.slice(0, 8));
+      }
+    },
+  );
+
+  it('PREVIOUS key rejection rewrites every TOKEN_ENC_KEY label (not only the first)', () => {
+    // Example/placeholder reason is "TOKEN_ENC_KEY must not be the example/placeholder value".
+    // After rewrite it must name PREVIOUS and must not leave a bare TOKEN_ENC_KEY behind
+    // (except as the PREFIX of TOKEN_ENC_KEY_PREVIOUS).
+    const msg = bootError({
+      TOKEN_ENC_KEY: PROD_SAFE_TOKEN_ENC_KEY,
+      TOKEN_ENC_KEY_PREVIOUS: TEST_TOKEN_ENC_KEY,
+    });
+    expect(msg).toMatch(/TOKEN_ENC_KEY_PREVIOUS must not be the example/);
+    expect(msg).not.toMatch(/TOKEN_ENC_KEY(?!_PREVIOUS)/);
+    expect(msg).not.toContain(TEST_TOKEN_ENC_KEY.slice(0, 8));
+  });
+});
