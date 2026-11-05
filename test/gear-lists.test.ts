@@ -1577,7 +1577,7 @@ describe('gear lists (platform#17)', () => {
       list: { items: [], slots: { head: null } },
     });
 
-    // set_slot A → B, then older-base op on A → stale; list stays B
+    // set_slot A → B, then older-base add_item A → exactly stale_base_version; list stays B
     await clearCooldown(ctx);
     await ctx.app.inject({
       method: 'POST',
@@ -1608,7 +1608,7 @@ describe('gear lists (platform#17)', () => {
     expect((setB.json() as { list: { slots: Record<string, number | null> } }).list.slots.head).toBe(16900);
 
     await clearCooldown(ctx);
-    const opOnA = randomUUID();
+    const addOnA = randomUUID();
     const staleOnA = await ctx.app.inject({
       method: 'POST',
       url: `/api/v1/gear-lists/${list.id}/ops`,
@@ -1616,31 +1616,228 @@ describe('gear lists (platform#17)', () => {
       payload: {
         ops: [
           {
-            op_id: opOnA,
-            type: 'reprioritize_item',
+            op_id: addOnA,
+            type: 'add_item',
             slot: 'head',
             item_id: 16846,
-            priority: 3,
+            priority: 2,
             base_version: afterB - 1,
           },
         ],
       },
     });
     expect(staleOnA.statusCode).toBe(200);
-    // Missing item after set_slot wipe → item_removed (stale watermark still applied via slot touch).
     expect(staleOnA.json()).toMatchObject({
       applied: [],
-      conflicts: [
-        expect.objectContaining({
-          op_id: opOnA,
-          reason: expect.stringMatching(/^(stale_base_version|item_removed)$/),
-        }),
-      ],
+      conflicts: [expect.objectContaining({ op_id: addOnA, reason: 'stale_base_version' })],
       list: { slots: { head: 16900 } },
     });
     expect(
       (staleOnA.json() as { list: { items: { item_id: number }[] } }).list.items.map((i) => i.item_id),
     ).toEqual([16900]);
+  });
+
+  it('same-slot multi-item wishlist batch at one base_version applies all (Option A / addon)', async () => {
+    const { cookie, csrf } = await signIn(ctx);
+    const characterId = await selectMain(ctx, cookie, csrf);
+    await seedSlotCatalog(ctx);
+    const list = await createArmoryList(ctx, cookie, csrf, characterId);
+
+    const idA = randomUUID();
+    const idB = randomUUID();
+    await clearCooldown(ctx);
+    const batch = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: idA,
+            type: 'add_item',
+            slot: 'head',
+            item_id: 16846,
+            priority: 1,
+            base_version: 1,
+          },
+          {
+            op_id: idB,
+            type: 'add_item',
+            slot: 'head',
+            item_id: 16900,
+            priority: 2,
+            base_version: 1,
+          },
+        ],
+      },
+    });
+    expect(batch.statusCode).toBe(200);
+    const body = batch.json() as {
+      applied: string[];
+      conflicts: unknown[];
+      version: number;
+      list: { items: { item_id: number; slot: string }[] };
+    };
+    expect(body.conflicts).toEqual([]);
+    expect(body.applied).toEqual([idA, idB]);
+    expect(body.list.items.filter((i) => i.slot === 'head').map((i) => i.item_id).sort()).toEqual([
+      16846, 16900,
+    ]);
+
+    // Option A remove+add swap in one batch (same base)
+    const remId = randomUUID();
+    const addId = randomUUID();
+    await clearCooldown(ctx);
+    const swap = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: remId,
+            type: 'remove_item',
+            slot: 'head',
+            item_id: 16846,
+            base_version: body.version,
+          },
+          {
+            op_id: addId,
+            type: 'add_item',
+            slot: 'head',
+            item_id: 18813,
+            priority: 1,
+            base_version: body.version,
+          },
+        ],
+      },
+    });
+    // 18813 is a ring — wrong slot → item_not_in_slot only on set_slot; add_item allows any Forever item
+    expect(swap.statusCode).toBe(200);
+    const swapBody = swap.json() as {
+      applied: string[];
+      conflicts: unknown[];
+      list: { items: { item_id: number }[] };
+    };
+    expect(swapBody.conflicts).toEqual([]);
+    expect(swapBody.applied).toEqual([remId, addId]);
+    expect(swapBody.list.items.map((i) => i.item_id).sort()).toEqual([16900, 18813]);
+
+    // set_slot then wishlist op on same slot in one batch (same-request wipe ignored)
+    const setId = randomUUID();
+    const addAfterSet = randomUUID();
+    await clearCooldown(ctx);
+    const mixed = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: setId,
+            type: 'set_slot',
+            slot: 'head',
+            item_id: 16846,
+            base_version: (swap.json() as { version: number }).version,
+          },
+          {
+            op_id: addAfterSet,
+            type: 'add_item',
+            slot: 'head',
+            item_id: 16900,
+            priority: 2,
+            base_version: (swap.json() as { version: number }).version,
+          },
+        ],
+      },
+    });
+    expect(mixed.statusCode).toBe(200);
+    const mixedBody = mixed.json() as {
+      applied: string[];
+      conflicts: unknown[];
+      list: { items: { item_id: number }[]; slots: Record<string, number | null> };
+    };
+    expect(mixedBody.conflicts).toEqual([]);
+    expect(mixedBody.applied).toEqual([setId, addAfterSet]);
+    expect(mixedBody.list.slots.head).toBe(16846);
+    expect(mixedBody.list.items.map((i) => i.item_id).sort()).toEqual([16846, 16900]);
+
+    // Same batch via /sync
+    const syncA = randomUUID();
+    const syncB = randomUUID();
+    await clearCooldown(ctx);
+    // clear head first so sync starts clean for two adds
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/gear-lists/${list.id}/ops`,
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        ops: [
+          {
+            op_id: randomUUID(),
+            type: 'clear_slot',
+            slot: 'head',
+            base_version: mixedBody.list.items ? (mixed.json() as { version: number }).version : 0,
+          },
+        ],
+      },
+    });
+    const afterClear = (
+      await ctx.app.inject({
+        method: 'GET',
+        url: `/api/v1/gear-lists/${list.id}`,
+        headers: { cookie },
+      })
+    ).json() as { version: number };
+
+    await clearCooldown(ctx);
+    const syncBatch = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/sync',
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {
+        schemaVersion: 1,
+        source: 'addon',
+        characterId,
+        lists: [
+          {
+            list_id: list.id,
+            since_version: afterClear.version,
+            ops: [
+              {
+                op_id: syncA,
+                type: 'add_item',
+                slot: 'head',
+                item_id: 16846,
+                priority: 1,
+                base_version: afterClear.version,
+              },
+              {
+                op_id: syncB,
+                type: 'add_item',
+                slot: 'head',
+                item_id: 16900,
+                priority: 2,
+                base_version: afterClear.version,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(syncBatch.statusCode).toBe(200);
+    const syncBody = syncBatch.json() as {
+      gear: {
+        result: {
+          applied: string[];
+          conflicts: unknown[];
+          list: { items: { item_id: number }[] };
+        };
+      }[];
+    };
+    expect(syncBody.gear[0]!.result.conflicts).toEqual([]);
+    expect(syncBody.gear[0]!.result.applied).toEqual([syncA, syncB]);
+    expect(syncBody.gear[0]!.result.list.items.map((i) => i.item_id).sort()).toEqual([16846, 16900]);
   });
 
   it('POST /sync applies set_slot and clear_slot (apply, no-op, stale)', async () => {

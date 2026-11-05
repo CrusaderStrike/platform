@@ -158,7 +158,12 @@ export async function countItems(db: Db, listId: string): Promise<number> {
   return Number(r.rows[0]?.n ?? 0);
 }
 
-/** Record a no-op op_id so retries stay deduped without bumping list.version. */
+/**
+ * Record a no-op op_id so retries stay deduped without bumping list.version.
+ * Retention: gear_op_noop_ids has no TTL yet (rows are tiny; CASCADE on list/guild delete).
+ * Align periodic cleanup with gear_list_events retention in a follow-up — do not let it
+ * grow unbounded without a plan.
+ */
 async function recordNoopOpId(
   db: Db,
   guildId: string,
@@ -542,8 +547,20 @@ async function lastItemTouchSeq(
   return r.rows[0] ? Number(r.rows[0].seq) : 0;
 }
 
-/** Latest seq that touched any item in `slot` (incl. GearSlotSet / GearSlotCleared). */
-async function lastSlotTouchSeq(db: Db, listId: string, slot: string): Promise<number> {
+/**
+ * Latest seq that touched any item in `slot` (item + wipe events).
+ * When `maxSeq` is set, ignore events with seq > maxSeq (same-request / this batch).
+ *
+ * Same-request rule: applyOps captures batchStartVersion = list.version at entry.
+ * Events with seq > batchStartVersion were written earlier in THIS request and must
+ * not make later ops in the same batch look stale (web stamps one base_version per chunk).
+ */
+async function lastSlotTouchSeq(
+  db: Db,
+  listId: string,
+  slot: string,
+  maxSeq?: number,
+): Promise<number> {
   const r = await db.query<{ seq: string }>(
     `SELECT seq FROM gear_list_events
      WHERE list_id = $1
@@ -552,9 +569,34 @@ async function lastSlotTouchSeq(db: Db, listId: string, slot: string): Promise<n
          'GearSlotSet','GearSlotCleared'
        )
        AND (payload->>'slot') = $2
+       AND ($3::bigint IS NULL OR seq <= $3)
      ORDER BY seq DESC
      LIMIT 1`,
-    [listId, slot],
+    [listId, slot, maxSeq ?? null],
+  );
+  return r.rows[0] ? Number(r.rows[0].seq) : 0;
+}
+
+/**
+ * Latest GearSlotSet / GearSlotCleared seq for `slot` (wipe watermark for wishlist ops).
+ * Does not count wishlist item events — two add_items in one slot at one base must both apply.
+ * When `maxSeq` is set, ignore same-request wipes (seq > maxSeq).
+ */
+async function lastSlotWipeSeq(
+  db: Db,
+  listId: string,
+  slot: string,
+  maxSeq?: number,
+): Promise<number> {
+  const r = await db.query<{ seq: string }>(
+    `SELECT seq FROM gear_list_events
+     WHERE list_id = $1
+       AND event_type IN ('GearSlotSet','GearSlotCleared')
+       AND (payload->>'slot') = $2
+       AND ($3::bigint IS NULL OR seq <= $3)
+     ORDER BY seq DESC
+     LIMIT 1`,
+    [listId, slot, maxSeq ?? null],
   );
   return r.rows[0] ? Number(r.rows[0].seq) : 0;
 }
@@ -600,6 +642,8 @@ export async function applyOps(
   }
   let list = locked;
   let version = Number(list.version);
+  // Events with seq > batchStartVersion are from this request — excluded from stale watermarks.
+  const batchStartVersion = version;
 
   for (const op of args.ops) {
     const idem = idempotencyKeyForOp(op.op_id);
@@ -648,7 +692,8 @@ export async function applyOps(
     // --- set_slot / clear_slot (armory replace-in-slot; additive; old op types unchanged) ---
     if (op.type === 'set_slot' || op.type === 'clear_slot') {
       const inSlot = await getItemsInSlot(db, list.id, op.slot);
-      const lastTouch = await lastSlotTouchSeq(db, list.id, op.slot);
+      // Full slot watermark, but ignore touches from earlier ops in this same request.
+      const lastTouch = await lastSlotTouchSeq(db, list.id, op.slot, batchStartVersion);
 
       if (lastTouch > op.base_version) {
         version += 1;
@@ -777,11 +822,12 @@ export async function applyOps(
 
     const items = await getItems(db, list.id);
     const existing = items.find((i) => i.slot === op.slot && i.item_id === op.item_id!);
-    // Slot watermark must win: clear_slot / set_slot wipe items without item_id in payload,
-    // so lastItemTouchSeq alone would miss them (addon sync + Option B race).
+    // Per-item watermark (original) + prior-request wipe only (GearSlotSet/Cleared).
+    // Same-slot multi-item wishlist batches at one base_version must all apply; wipes from
+    // earlier requests still stale-reject in-flight addon ops on wiped items.
     const lastTouch = Math.max(
       await lastItemTouchSeq(db, list.id, op.slot, op.item_id!),
-      await lastSlotTouchSeq(db, list.id, op.slot),
+      await lastSlotWipeSeq(db, list.id, op.slot, batchStartVersion),
     );
 
     // Stale base_version when the same item was touched after client's base

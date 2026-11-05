@@ -1113,6 +1113,13 @@ paths:
         no-op when already empty. Wishlist ops (`add_item` / `remove_item` / …) stay valid
         for addon sync.
 
+        **Same-request stale rule:** `base_version` is compared only against events that
+        existed when the request started (`seq <= batchStartVersion`). Earlier ops in the
+        same `/ops` or `/sync` batch do not make later ops stale, so Option A chunks that
+        stamp one `base_version` (multi-item adds, remove+add swaps) all apply. Wishlist
+        ops additionally treat only prior-request `GearSlotSet`/`GearSlotCleared` as a
+        slot wipe watermark (`max(lastItemTouchSeq, lastSlotWipeSeq)`).
+
         **`base_version` (web):** the list `version` the client last observed (from GET,
         create, or the previous ops/sync response). Set every web op's `base_version` to
         that value. If the server has applied a later event touching the same item, the op

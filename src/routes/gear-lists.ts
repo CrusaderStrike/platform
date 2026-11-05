@@ -137,7 +137,11 @@ async function assertForeverSlotItem(
   }
 }
 
-/** Shared Forever + slot-fit predicates for applyOps (/ops and /sync). */
+/**
+ * Shared Forever + slot-fit predicates for applyOps (/ops and /sync).
+ * One catalog getItem per (itemId) call site: foreverCheck caches the row so fitsSlot
+ * does not re-read when set_slot runs both checks.
+ */
 function foreverSlotChecks(
   db: Parameters<typeof foreverItems.catalogIsActive>[0],
   catalogActive: boolean,
@@ -145,15 +149,23 @@ function foreverSlotChecks(
   foreverCheck: (itemId: number) => Promise<boolean>;
   fitsSlot: (itemId: number, slot: string) => Promise<boolean>;
 } {
+  const cache = new Map<number, Awaited<ReturnType<typeof foreverItems.getItem>> | undefined>();
+  async function load(itemId: number) {
+    if (!catalogActive) return null;
+    if (cache.has(itemId)) return cache.get(itemId) ?? null;
+    const row = await foreverItems.getItem(db, itemId);
+    cache.set(itemId, row);
+    return row;
+  }
   return {
     foreverCheck: async (itemId) => {
       if (!catalogActive) return true;
-      return foreverItems.itemExists(db, itemId);
+      return (await load(itemId)) != null;
     },
     fitsSlot: async (itemId, slot) => {
       if (!catalogActive) return true;
-      const row = await foreverItems.getItem(db, itemId);
-      if (!row) return true; // foreverCheck owns missing-item
+      const row = await load(itemId);
+      if (!row) return true; // foreverCheck owns missing-item (runs first for set_slot)
       const aliases = row.slot_aliases ?? [];
       return row.slot === slot || aliases.includes(slot);
     },
