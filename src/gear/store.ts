@@ -923,12 +923,12 @@ export function serializeEvent(ev: GearEventRow): Record<string, unknown> {
   };
 }
 
-/** Max gear writes per user per rolling 60s window (no minimum interval between writes). */
+/** Max gear writes per user per fixed 60s window (no minimum interval between writes). */
 export const GEAR_WRITE_LIMIT_PER_MIN = 60;
 export const GEAR_WRITE_WINDOW_MS = 60_000;
 
 /**
- * Atomically consume one gear-write token in the rolling 60/min window.
+ * Atomically consume one gear-write token in the fixed 60/min window.
  * Call **once before** the write (not check-then-touch after). Concurrent callers
  * serialize on the row update, so at most 60 requests per window see write_count <= 60.
  * A later failed write (e.g. 409) still consumes the token.
