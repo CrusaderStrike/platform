@@ -171,7 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       const prevCheck = validateTokenEncKey(previous);
       if (!prevCheck.ok) {
         throw new Error(
-          `Invalid configuration: ${prevCheck.reason.replace('TOKEN_ENC_KEY', 'TOKEN_ENC_KEY_PREVIOUS')}`,
+          `Invalid configuration: ${prevCheck.reason.replace(/TOKEN_ENC_KEY(?!_PREVIOUS)/g, 'TOKEN_ENC_KEY_PREVIOUS')}`,
         );
       }
       if (previous === tokenKey) {
