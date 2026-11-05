@@ -586,6 +586,47 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
   });
 
+  it('forwards prompt=login to Battle.net authorize (platform#76)', async () => {
+    ctx = await startTestApp();
+    const login = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/profile/&prompt=login',
+    });
+    expect(login.statusCode).toBe(302);
+    const loc = String(login.headers.location);
+    expect(loc).toContain('oauth/authorize');
+    const u = new URL(loc);
+    expect(u.searchParams.get('prompt')).toBe('login');
+  });
+
+  it('omits prompt from authorize URL when not provided (platform#76)', async () => {
+    ctx = await startTestApp();
+    const login = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/profile/',
+    });
+    expect(login.statusCode).toBe(302);
+    const u = new URL(String(login.headers.location));
+    expect(u.searchParams.has('prompt')).toBe(false);
+  });
+
+  it('rejects invalid prompt with 400 validation_error (platform#76)', async () => {
+    ctx = await startTestApp();
+    for (const value of ['select_account', 'consent', 'none', 'LOGIN', 'login ']) {
+      const login = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/blizzard/login?return_to=/profile/&prompt=' + encodeURIComponent(value),
+      });
+      expect(login.statusCode, `prompt=${value}`).toBe(400);
+      const body = login.json() as {
+        error?: { code?: string };
+        errors?: { prompt?: string };
+      };
+      // AppError with fields → { errors: { prompt: 'invalid' } }
+      expect(body.errors?.prompt, `prompt=${value}`).toBe('invalid');
+    }
+  });
+
   it('allows return_to=/profile/ on Battle.net login', async () => {
     ctx = await startTestApp();
     expect(isSafeReturnTo('/profile/')).toBe(true);

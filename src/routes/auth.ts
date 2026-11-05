@@ -18,6 +18,7 @@ import {
   requireSession,
   setSessionCookie,
 } from '../auth/session.js';
+import { AppError } from '../lib/errors.js';
 
 export type AuthDeps = {
   pool: Pool;
@@ -70,14 +71,25 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
   });
 
   app.get('/api/v1/auth/blizzard/login', async (req, reply) => {
-    const q = req.query as { return_to?: string };
+    const q = req.query as { return_to?: string; prompt?: string };
     // Invalid / missing return_to soft-falls back to /profile/ (platform#64). Never 400.
     const returnTo = resolveReturnTo(config.PUBLIC_WEB_ORIGIN, q.return_to, req.log);
+    // Optional prompt (platform#76): allow-list `login` only. Missing → omit.
+    // Invalid → 400 validation_error (unlike return_to soft-fallback).
+    // `select_account` is not allow-listed: Blizzard does not document/support it (forum 2020).
+    let prompt: 'login' | undefined;
+    if (q.prompt !== undefined && q.prompt !== '') {
+      if (q.prompt === 'login') {
+        prompt = 'login';
+      } else {
+        throw new AppError(400, 'validation_error', 'Invalid prompt.', { prompt: 'invalid' });
+      }
+    }
     const state = randomToken(24);
     const codeVerifier = randomToken(32);
     const codeChallenge = sha256Base64Url(codeVerifier);
     await store.saveOauthState(pool, { state, codeVerifier, returnTo });
-    const url = blizzard.buildAuthorizeUrl({ state, codeChallenge });
+    const url = blizzard.buildAuthorizeUrl({ state, codeChallenge, prompt });
     return reply.redirect(url);
   });
 

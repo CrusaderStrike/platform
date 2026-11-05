@@ -9,6 +9,7 @@ Language-agnostic notes for Web / Addon clients. OpenAPI (`openapi/v1.yaml`) is 
 | Query | Required | Notes |
 |---|---|---|
 | `return_to` | no | Same-origin **relative** path only. Must start with a single `/` after decoding once. No `//`, scheme/host, backslash, or encoded forms of those. After that check, the path is resolved against the site origin and must stay on that origin (so values like `/.//evil` that collapse to a protocol-relative path are rejected). Soft-fallback: invalid or missing → `/profile/` (login still `302`s to Battle.net; never `400`). Stored server-side with the OAuth state. |
+| `prompt` | no | Allow-list: `login` only (platform#76). Forwarded to Battle.net authorize. Missing/empty → omitted. Any other value → `400` with `{ errors: { prompt: invalid } }`. Use after `DELETE /auth/session` for switch-account. Blizzard may ignore `prompt` when a Battle.net cookie session already exists (not documented; forum reports 2020). |
 
 ### Pattern (accepted)
 

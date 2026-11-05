@@ -57,10 +57,13 @@ paths:
     get:
       tags: [auth]
       operationId: blizzardLogin
-      summary: Start Blizzard OAuth (platform#11, return_to platform#64)
+      summary: Start Blizzard OAuth (platform#11, return_to platform#64, prompt platform#76)
       description: |
         Redirects to Battle.net authorize with server-side state and PKCE. Scope `wow.profile`.
         The client secret never reaches the browser.
+        Optional `prompt=login` is forwarded to Battle.net for a "switch account" flow after sign-out
+        (platform#76). Blizzard's docs do not document `prompt`; community reports (2020) say it may
+        be ignored when a Battle.net session already exists. We still forward allow-listed values.
       security: []
       parameters:
         - name: return_to
@@ -75,9 +78,21 @@ paths:
             Invalid or missing values soft-fall back to `/profile/` (login still redirects to Battle.net; no 400).
             Accepted examples: `/profile/`, `/gear/`, `/@evil.com` (path on our origin).
           schema: { type: string, pattern: '^/(?![/\\])[^\\]*$', maxLength: 512 }
+        - name: prompt
+          in: query
+          description: |
+            Optional OIDC-style prompt forwarded to Battle.net authorize (platform#76).
+            Allow-list: `login` only (`select_account` is not supported — Blizzard does not document it).
+            Missing/empty → omit from the authorize URL. Any other value → `400` with
+            `{ errors: { prompt: invalid } }` (unlike `return_to`, which soft-falls back).
+            Intended for Web's switch-account flow: `DELETE /auth/session` then redirect here with
+            `prompt=login` (and usually `return_to=/profile/`).
+          schema: { type: string, enum: [login] }
       responses:
         '302':
-          description: Redirect to Battle.net authorize URL. Always 302; invalid return_to falls back to /profile/.
+          description: Redirect to Battle.net authorize URL. Invalid return_to falls back to /profile/.
+        '400':
+          description: Invalid `prompt` (not in allow-list).
   /auth/blizzard/callback:
     get:
       tags: [auth]
