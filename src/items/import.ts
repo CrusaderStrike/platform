@@ -19,6 +19,7 @@ import {
 import * as store from './store.js';
 import type { ItemStat } from './store.js';
 import { iconNameFromUrl, sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
+import { decideCatalogMetaActivation } from './import-meta-policy.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -218,6 +219,30 @@ async function main(): Promise<void> {
   }
 
   const count = await store.countItems(pool);
+  const metaDecision = decideCatalogMetaActivation({
+    partialOnly: only != null,
+    itemErrors,
+  });
+  if (!metaDecision.setMeta) {
+    console.error(metaDecision.message);
+    console.error(
+      JSON.stringify({
+        ok: false,
+        refused_set_meta: true,
+        region,
+        upserted,
+        skippedUnmapped,
+        item_errors: itemErrors,
+        item_count: count,
+        build_id: null,
+        per_type: perType,
+        reason: metaDecision.message,
+      }),
+    );
+    await pool.end();
+    process.exit(1);
+  }
+
   const buildId = `forever-${region}-${count}-${Date.now()}`;
   await store.setMeta(pool, { buildId, itemCount: count, region });
   console.log(

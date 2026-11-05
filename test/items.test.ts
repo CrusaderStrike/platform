@@ -119,6 +119,20 @@ describe('Forever items catalog', () => {
     expect(IMPORT_INVENTORY_TYPES).not.toContain('2HWEAPON');
   });
 
+  it('decideCatalogMetaActivation refuses setMeta on --only or item_errors > 0', async () => {
+    const { decideCatalogMetaActivation } = await import('../src/items/import-meta-policy.js');
+    expect(decideCatalogMetaActivation({ partialOnly: false, itemErrors: 0 })).toEqual({ setMeta: true });
+    const only = decideCatalogMetaActivation({ partialOnly: true, itemErrors: 0 });
+    expect(only.setMeta).toBe(false);
+    if (!only.setMeta) expect(only.message).toMatch(/--only/i);
+    const errs = decideCatalogMetaActivation({ partialOnly: false, itemErrors: 3 });
+    expect(errs.setMeta).toBe(false);
+    if (!errs.setMeta) expect(errs.message).toMatch(/item_errors=3/);
+    // --only wins even when errors are also present
+    const both = decideCatalogMetaActivation({ partialOnly: true, itemErrors: 9 });
+    expect(both.setMeta).toBe(false);
+  });
+
   it('GET /api/v1/items filters by slot, class, q and returns snake_case Forever fields', async () => {
     await seedCatalog();
     const head = await ctx.app.inject({
