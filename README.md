@@ -62,7 +62,7 @@ from addon#15 are stored; BG stats keep `honorable_kills` only.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/v1/auth/blizzard/login` | Starts OAuth; `return_to` relative path |
+| GET | `/api/v1/auth/blizzard/login` | Starts OAuth; optional `return_to` (same-origin relative; invalid → `/profile/`) |
 | GET | `/api/v1/auth/blizzard/callback` | Always 302 to site with `auth=` |
 | GET | `/api/v1/auth/session` | Session + `csrf_token` |
 | DELETE | `/api/v1/auth/session` | Logout (CSRF) |

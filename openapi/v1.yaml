@@ -57,7 +57,7 @@ paths:
     get:
       tags: [auth]
       operationId: blizzardLogin
-      summary: Start Blizzard OAuth (platform#11)
+      summary: Start Blizzard OAuth (platform#11, return_to platform#64)
       description: |
         Redirects to Battle.net authorize with server-side state and PKCE. Scope `wow.profile`.
         The client secret never reaches the browser.
@@ -66,13 +66,14 @@ paths:
         - name: return_to
           in: query
           description: |
-            Relative same-site path only, for example `/signin.html`. It must start with a single `/`. Absolute URLs,
-            `//host` and backslashes are rejected with 400. Defaults to `/signin.html`.
+            Optional post-login path (platform#64). Same-origin relative path only: must start with a single `/`
+            after decoding once; no `//`, scheme/host, backslash, or encoded versions of those. Validated and
+            stored server-side with the OAuth state — the callback never reads `return_to` from the query.
+            Invalid or missing values soft-fall back to `/profile/` (login still redirects to Battle.net; no 400).
           schema: { type: string, pattern: '^/(?![/\\])[^\\]*$', maxLength: 512 }
       responses:
         '302':
-          description: Redirect to Battle.net authorize URL.
-        '400': { $ref: '#/components/responses/ValidationError' }
+          description: Redirect to Battle.net authorize URL. Always 302; invalid return_to falls back to /profile/.
   /auth/blizzard/callback:
     get:
       tags: [auth]
@@ -80,7 +81,10 @@ paths:
       summary: OAuth callback; always redirects back to the site
       description: |
         This endpoint never returns JSON to the browser. It always responds with `302` to
-        `https://crusaderstrike.com{return_to}` plus an `auth` query parameter:
+        `https://crusaderstrike.com{stored_return_to}` plus an `auth` query parameter.
+        `stored_return_to` comes from the server-side OAuth state row created at login (never from a
+        callback query `return_to`). After lookup the state row is deleted (single-use). Missing,
+        expired, or invalid stored paths fall back to `/profile/`.
         - `auth=ok` when the session is set (`Set-Cookie: cs_session; HttpOnly; Secure; SameSite=Lax`).
         - `auth=cancelled` when Battle.net sent `error=access_denied` (the user cancelled; there is no `code`).
         - `auth=error&reason=<code>` for any other failure. `reason` is one of `invalid_state`,

@@ -159,15 +159,17 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(location).not.toContain('auth=ok');
   });
 
-  it('invalid state redirects with auth=error&reason=invalid_state', async () => {
+  it('invalid state redirects with auth=error&reason=invalid_state to /profile/', async () => {
     ctx = await startTestApp();
     const callback = await ctx.app.inject({
       method: 'GET',
       url: '/api/v1/auth/blizzard/callback?code=x&state=not-a-real-state',
     });
     expect(callback.statusCode).toBe(302);
-    expect(String(callback.headers.location)).toContain('auth=error');
-    expect(String(callback.headers.location)).toContain('reason=invalid_state');
+    const loc = String(callback.headers.location);
+    expect(loc).toContain('/profile/');
+    expect(loc).toContain('auth=error');
+    expect(loc).toContain('reason=invalid_state');
   });
 
   it('upstream 5xx on token exchange → auth=error&reason=upstream_unavailable', async () => {
@@ -188,7 +190,7 @@ describe('Blizzard OAuth + characters (#11)', () => {
     expect(String(callback.headers.location)).toContain('reason=upstream_unavailable');
   });
 
-  it('rejects unsafe return_to including open-redirect variants', async () => {
+  it('soft-falls unsafe return_to to /profile/ (still starts OAuth)', async () => {
     ctx = await startTestApp();
     const cases = [
       'https://evil.example/',
@@ -201,17 +203,31 @@ describe('Blizzard OAuth + characters (#11)', () => {
       '/%5cevil.com',
     ];
     for (const value of cases) {
-      const bad = await ctx.app.inject({
+      const login = await ctx.app.inject({
         method: 'GET',
         url: '/api/v1/auth/blizzard/login?return_to=' + value,
       });
-      expect(bad.statusCode, `return_to=${value}`).toBe(400);
+      // platform#64: never 400 — soft-fall back and still redirect to Battle.net
+      expect(login.statusCode, `return_to=${value}`).toBe(302);
+      expect(String(login.headers.location), `return_to=${value}`).toContain('oauth/authorize');
+      const { redirectTo } = ctx.mock.completeLogin({
+        authorizeUrl: login.headers.location as string,
+        outcome: 'ok',
+      });
+      const cbUrl = new URL(redirectTo);
+      const callback = await ctx.app.inject({
+        method: 'GET',
+        url: cbUrl.pathname + cbUrl.search,
+      });
+      expect(String(callback.headers.location), `return_to=${value}`).toContain('/profile/');
+      expect(String(callback.headers.location), `return_to=${value}`).toContain('auth=ok');
     }
-    // Unit: control-char path must not pass isSafeReturnTo / safeWebRedirect
+    // Unit: control-char / encoded bypass must not pass isSafeReturnTo / safeWebRedirect
     expect(isSafeReturnTo('/\t/evil.com')).toBe(false);
     expect(isSafeReturnTo('/%09/evil.com')).toBe(false);
-    expect(isSafeReturnTo('/%2F%2Fevil.com')).toBe(false); // normalizes to //evil.com
-    expect(isSafeReturnTo('/%2f/evil.com')).toBe(false); // normalizes to ///evil.com → starts with //
+    expect(isSafeReturnTo('/%2F%2Fevil.com')).toBe(false); // one decode → //evil.com
+    expect(isSafeReturnTo('/%2f/evil.com')).toBe(false); // one decode → ///evil.com → starts with //
+    expect(isSafeReturnTo('/%252F%252Fevil.com')).toBe(false); // residual %2F after one decode
     expect(() => safeWebRedirect('https://crusaderstrike.com', '/\t/evil.com')).toThrow();
   });
 
@@ -577,6 +593,59 @@ describe('Blizzard OAuth + characters (#11)', () => {
     });
     expect(login.statusCode).toBe(302);
     expect(String(login.headers.location)).toContain('oauth/authorize');
+  });
+
+  it('return_to valid path is stored and used on callback (platform#64)', async () => {
+    ctx = await startTestApp();
+    const { location } = await signIn(ctx, { returnTo: '/gear/' });
+    expect(location).toContain('/gear/');
+    expect(location).toContain('auth=ok');
+    expect(location).not.toContain('/profile/');
+  });
+
+  it('missing return_to falls back to /profile/ (platform#64)', async () => {
+    ctx = await startTestApp();
+    const login = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login',
+    });
+    expect(login.statusCode).toBe(302);
+    const { redirectTo } = ctx.mock.completeLogin({
+      authorizeUrl: login.headers.location as string,
+      outcome: 'ok',
+    });
+    const cbUrl = new URL(redirectTo);
+    const callback = await ctx.app.inject({
+      method: 'GET',
+      url: cbUrl.pathname + cbUrl.search,
+    });
+    expect(String(callback.headers.location)).toContain('/profile/');
+    expect(String(callback.headers.location)).toContain('auth=ok');
+  });
+
+  it('callback ignores return_to query; reuse after clear falls back (platform#64)', async () => {
+    ctx = await startTestApp();
+    const login = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/blizzard/login?return_to=/gear/',
+    });
+    const authorizeUrl = login.headers.location as string;
+    const { redirectTo } = ctx.mock.completeLogin({ authorizeUrl, outcome: 'ok' });
+    const cbUrl = new URL(redirectTo);
+    // Attacker-supplied return_to on the callback must be ignored.
+    const poisoned = cbUrl.pathname + cbUrl.search + '&return_to=https://evil.example/';
+    const first = await ctx.app.inject({ method: 'GET', url: poisoned });
+    expect(String(first.headers.location)).toContain('/gear/');
+    expect(String(first.headers.location)).toContain('auth=ok');
+    expect(String(first.headers.location)).not.toContain('evil.example');
+
+    // State already consumed (single-use) → invalid_state → /profile/
+    const reuse = await ctx.app.inject({
+      method: 'GET',
+      url: cbUrl.pathname + cbUrl.search,
+    });
+    expect(String(reuse.headers.location)).toContain('/profile/');
+    expect(String(reuse.headers.location)).toContain('reason=invalid_state');
   });
 
   it('refresh returns CharacterList; second call within 60s → 429 Retry-After', async () => {

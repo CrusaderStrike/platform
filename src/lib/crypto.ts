@@ -26,26 +26,19 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ba, bb);
 }
 
-/** Decode URI component until stable (cap iterations). Returns null on malformed encoding. */
+/** Decode URI component exactly once. Returns null on malformed encoding. */
 export function normalizeReturnTo(value: string): string | null {
-  let cur = value;
-  for (let i = 0; i < 5; i++) {
-    let next: string;
-    try {
-      next = decodeURIComponent(cur);
-    } catch {
-      return null;
-    }
-    if (next === cur) return cur;
-    cur = next;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
   }
-  return cur;
 }
 
 /**
- * Relative same-site path only.
- * Rejects control chars/whitespace, backslashes, and anything that begins with //
- * (or /\) before or after normalizing/decoding.
+ * Relative same-site path only (platform#64).
+ * Decode once, then require a single leading `/`. Reject `//`, scheme/host, backslash,
+ * control chars/whitespace, and residual encoded `/` or `\` after that one decode.
  */
 export function isSafeReturnTo(value: string | undefined | null): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 512) return false;
@@ -53,14 +46,18 @@ export function isSafeReturnTo(value: string | undefined | null): value is strin
   if (value.includes('\\')) return false;
   if (!value.startsWith('/')) return false;
   if (value.startsWith('//') || value.startsWith('/\\')) return false;
+  // Absolute / scheme-looking after the leading slash (e.g. /https://…).
+  if (/^\/[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return false;
 
   const normalized = normalizeReturnTo(value);
   if (normalized === null) return false;
   if (/[\x00-\x1f\x7f\s]/.test(normalized)) return false;
   if (normalized.includes('\\')) return false;
   if (!normalized.startsWith('/')) return false;
-  // Web Dev: reject if it begins with // after normalizing.
   if (normalized.startsWith('//') || normalized.startsWith('/\\')) return false;
+  if (/^\/[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) return false;
+  // After one decode, reject residual encoded slash/backslash that would enable a second hop.
+  if (/%2f|%5c/i.test(normalized)) return false;
   return true;
 }
 
