@@ -130,7 +130,7 @@ describe('Forever items catalog', () => {
   it('GET /api/v1/items?slot=ranged returns no AMMO items (ammo is its own slot)', async () => {
     await items.upsertItem(ctx.pool, {
       itemId: 22316,
-      name: 'Test Relic',
+      name: 'Shadow Relic',
       slot: 'ranged',
       slotAliases: [],
       inventoryType: 'RELIC',
@@ -193,11 +193,11 @@ describe('Forever items catalog', () => {
     expect(both.setMeta).toBe(false);
   });
 
-  it('GET /api/v1/items filters by slot, class, q and returns snake_case Forever fields', async () => {
+  it('GET /api/v1/items filters by slot, armor_type, q and returns snake_case Forever fields', async () => {
     await seedCatalog();
     const head = await ctx.app.inject({
       method: 'GET',
-      url: '/api/v1/items?slot=head&class=mail',
+      url: '/api/v1/items?slot=head&armor_type=mail',
     });
     expect(head.statusCode).toBe(200);
     expect(head.headers.etag).toBeTruthy();
@@ -252,7 +252,7 @@ describe('Forever items catalog', () => {
 
     const alias = await ctx.app.inject({
       method: 'GET',
-      url: '/api/v1/items/search?slot=head&class=cloth',
+      url: '/api/v1/items/search?slot=head&armor_type=cloth',
     });
     expect(alias.statusCode).toBe(200);
     const aBody = alias.json() as { items: Array<{ item_id: number }> };
@@ -267,11 +267,15 @@ describe('Forever items catalog', () => {
     expect(again.statusCode).toBe(304);
   });
 
-  it('rejects bad slot / class query params', async () => {
+  it('rejects bad slot / armor_type / class query params', async () => {
     const badSlot = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=hat' });
     expect(badSlot.statusCode).toBe(400);
-    const badClass = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?class=clothh' });
-    expect(badClass.statusCode).toBe(400);
+    const badArmor = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?armor_type=clothh' });
+    expect(badArmor.statusCode).toBe(400);
+    const badClass = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?class=cloth' });
+    expect(badClass.statusCode).toBe(400); // cloth is armor_type, not a playable class
+    const badClass2 = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?class=hunterx' });
+    expect(badClass2.statusCode).toBe(400);
   });
 
   it('Blizzard mock Forever static: client credentials, item, media, search; rejects classic', async () => {
@@ -452,4 +456,471 @@ describe('Forever items catalog', () => {
     const search = await ctx.app.inject({ method: 'GET', url: '/api/v1/items/search' });
     expect(search.statusCode).toBe(429);
   });
-});
+
+  describe('Equip rules class filter (platform#78)', () => {
+    async function seedEquipCatalog(): Promise<void> {
+      await ctx.pool.query(`DELETE FROM public_api_rate_limits WHERE bucket = 'items'`);
+      const rows: Array<Parameters<typeof items.upsertItem>[1]> = [
+        {
+          itemId: 21355,
+          name: 'Genesis Boots',
+          slot: 'feet',
+          slotAliases: [],
+          inventoryType: 'FEET',
+          quality: 'epic',
+          itemLevel: 78,
+          requiredLevel: 60,
+          armorType: 'leather',
+          itemClass: 4,
+          itemSubclass: 2,
+          allowedClasses: ['druid'],
+          itemSetId: 493,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 22490,
+          name: 'Dreamwalker Headpiece',
+          slot: 'head',
+          slotAliases: [],
+          inventoryType: 'HEAD',
+          quality: 'epic',
+          itemLevel: 88,
+          requiredLevel: 60,
+          armorType: 'leather',
+          itemClass: 4,
+          itemSubclass: 2,
+          allowedClasses: null,
+          itemSetId: 521,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 22418,
+          name: 'Dreadnaught Helmet',
+          slot: 'head',
+          slotAliases: [],
+          inventoryType: 'HEAD',
+          quality: 'epic',
+          itemLevel: 88,
+          requiredLevel: 60,
+          armorType: 'plate',
+          itemClass: 4,
+          itemSubclass: 4,
+          allowedClasses: null,
+          itemSetId: 523,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 16914,
+          name: 'Netherwind Crown',
+          slot: 'head',
+          slotAliases: [],
+          inventoryType: 'HEAD',
+          quality: 'epic',
+          itemLevel: 76,
+          requiredLevel: 60,
+          armorType: 'cloth',
+          itemClass: 4,
+          itemSubclass: 1,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 1935,
+          name: "Assassin's Blade",
+          slot: 'main_hand',
+          slotAliases: ['off_hand'],
+          inventoryType: 'WEAPON',
+          quality: 'rare',
+          itemLevel: 24,
+          requiredLevel: 19,
+          armorType: null,
+          itemClass: 2,
+          itemSubclass: 15,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 19348,
+          name: 'Red Dragonscale Protector',
+          slot: 'off_hand',
+          slotAliases: [],
+          inventoryType: 'SHIELD',
+          quality: 'epic',
+          itemLevel: 74,
+          requiredLevel: 60,
+          armorType: null,
+          itemClass: 4,
+          itemSubclass: 6,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 19366,
+          name: "Master Dragonslayer's Orb",
+          slot: 'off_hand',
+          slotAliases: [],
+          inventoryType: 'HOLDABLE',
+          quality: 'epic',
+          itemLevel: 83,
+          requiredLevel: 60,
+          armorType: null,
+          itemClass: 4,
+          itemSubclass: 0,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 22397,
+          name: 'Idol of Ferocity',
+          slot: 'ranged',
+          slotAliases: [],
+          inventoryType: 'RELIC',
+          quality: 'rare',
+          itemLevel: 62,
+          requiredLevel: 57,
+          armorType: null,
+          itemClass: 4,
+          itemSubclass: 8,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 22399,
+          name: 'Libram of Truth',
+          slot: 'ranged',
+          slotAliases: [],
+          inventoryType: 'RELIC',
+          quality: 'rare',
+          itemLevel: 62,
+          requiredLevel: 57,
+          armorType: null,
+          itemClass: 4,
+          itemSubclass: 7,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 2512,
+          name: 'Rough Arrow',
+          slot: 'ammo',
+          slotAliases: [],
+          inventoryType: 'AMMO',
+          quality: 'common',
+          itemLevel: 5,
+          requiredLevel: 1,
+          armorType: null,
+          itemClass: 6,
+          itemSubclass: 2,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 99901,
+          name: '[PH] Deprecated Cloth Helm',
+          slot: 'head',
+          slotAliases: [],
+          inventoryType: 'HEAD',
+          quality: 'poor',
+          itemLevel: 1,
+          requiredLevel: 0,
+          armorType: 'cloth',
+          itemClass: 4,
+          itemSubclass: 1,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
+          itemId: 11263,
+          name: 'Nether Force Wand',
+          slot: 'ranged',
+          slotAliases: [],
+          inventoryType: 'RANGEDRIGHT',
+          quality: 'rare',
+          itemLevel: 40,
+          requiredLevel: 35,
+          armorType: null,
+          itemClass: 2,
+          itemSubclass: 19,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+      ];
+      for (const row of rows) {
+        await items.upsertItem(ctx.pool, row);
+      }
+      await items.upsertItemSet(ctx.pool, {
+        id: 493,
+        name: 'Genesis Raiment',
+        effects: null,
+        allowedClasses: ['druid'],
+        classSource: 'items',
+        buildId: 'test-sets',
+        itemIds: [21355],
+      });
+      await items.upsertItemSet(ctx.pool, {
+        id: 521,
+        name: 'Dreamwalker Raiment',
+        effects: null,
+        allowedClasses: ['druid'],
+        classSource: 'manual',
+        buildId: 'test-sets',
+        itemIds: [22490],
+      });
+      await items.upsertItemSet(ctx.pool, {
+        id: 523,
+        name: "Dreadnaught's Battlegear",
+        effects: null,
+        allowedClasses: ['warrior'],
+        classSource: 'manual',
+        buildId: 'test-sets',
+        itemIds: [22418],
+      });
+      await items.setMeta(ctx.pool, {
+        buildId: 'equip-rules-test',
+        itemCount: rows.length,
+        setCount: 3,
+        region: 'us',
+      });
+    }
+
+    it('class=druid returns leather armor, idols, held; hides plate sets, librams, junk', async () => {
+      await seedEquipCatalog();
+      const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?class=druid&limit=100' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        items: Array<{
+          item_id: number;
+          item_class: number | null;
+          item_subclass: number | null;
+          allowed_classes: string[] | null;
+        }>;
+      };
+      const ids = body.items.map((i) => i.item_id);
+      expect(ids).toContain(21355); // Genesis tagged druid
+      expect(ids).toContain(22490); // Dreamwalker via manual set
+      expect(ids).toContain(22397); // idol
+      expect(ids).toContain(19366); // held
+      expect(ids).toContain(16914); // cloth ok for druid
+      expect(ids).not.toContain(22418); // warrior T3
+      expect(ids).not.toContain(22399); // libram
+      expect(ids).not.toContain(2512); // ammo
+      expect(ids).not.toContain(99901); // junk
+      const genesis = body.items.find((i) => i.item_id === 21355)!;
+      expect(genesis).toMatchObject({
+        item_class: 4,
+        item_subclass: 2,
+        allowed_classes: ['druid'],
+      });
+      const dream = body.items.find((i) => i.item_id === 22490)!;
+      expect(dream.allowed_classes).toEqual(['druid']);
+    });
+
+    it('class=warrior&slot=off_hand allows shield and dual-wield 1H; class=mage does not', async () => {
+      await seedEquipCatalog();
+      const war = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/items?class=warrior&slot=off_hand',
+      });
+      expect(war.statusCode).toBe(200);
+      const warIds = (war.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(warIds).toContain(19348); // shield
+      expect(warIds).toContain(1935); // 1H dagger via aliases
+      expect(warIds).toContain(19366); // held
+
+      const mage = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/items?class=mage&slot=off_hand',
+      });
+      expect(mage.statusCode).toBe(200);
+      const mageIds = (mage.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(mageIds).toContain(19366);
+      expect(mageIds).not.toContain(19348);
+      expect(mageIds).not.toContain(1935);
+    });
+
+    it('class=hunter gets ammo; class=priest gets wands not guns/ammo', async () => {
+      await seedEquipCatalog();
+      const hunter = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?class=hunter&slot=ammo' });
+      expect(hunter.statusCode).toBe(200);
+      expect((hunter.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id)).toEqual([
+        2512,
+      ]);
+
+      const priest = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/items?class=priest&slot=ranged',
+      });
+      expect(priest.statusCode).toBe(200);
+      const ids = (priest.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(ids).toContain(11263);
+      expect(ids).not.toContain(22397);
+    });
+
+    it('class and armor_type combine; junk excluded by default without class', async () => {
+      await seedEquipCatalog();
+      const both = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/items?class=druid&armor_type=leather',
+      });
+      expect(both.statusCode).toBe(200);
+      const ids = (both.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(ids).toContain(21355);
+      expect(ids).toContain(22490);
+      expect(ids).not.toContain(16914);
+
+      const all = await ctx.app.inject({ method: 'GET', url: '/api/v1/items?slot=head&limit=100' });
+      expect(all.statusCode).toBe(200);
+      const headIds = (all.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(headIds).not.toContain(99901);
+    });
+
+    it('import --sets-only against the mock upserts sets with items/manual sources', async () => {
+      const { startMockBlizzard } = await import('../src/blizzard/mock.js');
+      const mock = await startMockBlizzard();
+      try {
+        // Seed Dreamwalker + Genesis items so set import can see piece tags / set ids
+        await items.upsertItem(ctx.pool, {
+          itemId: 21355,
+          name: 'Genesis Boots',
+          slot: 'feet',
+          slotAliases: [],
+          inventoryType: 'FEET',
+          quality: 'epic',
+          itemLevel: 78,
+          requiredLevel: 60,
+          armorType: 'leather',
+          itemClass: 4,
+          itemSubclass: 2,
+          allowedClasses: ['druid'],
+          itemSetId: 493,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        });
+        await items.upsertItem(ctx.pool, {
+          itemId: 22490,
+          name: 'Dreamwalker Headpiece',
+          slot: 'head',
+          slotAliases: [],
+          inventoryType: 'HEAD',
+          quality: 'epic',
+          itemLevel: 88,
+          requiredLevel: 60,
+          armorType: 'leather',
+          itemClass: 4,
+          itemSubclass: 2,
+          allowedClasses: null,
+          itemSetId: 521,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        });
+        await items.setMeta(ctx.pool, { buildId: 'pre-sets', itemCount: 2, region: 'us' });
+
+        const client = createBlizzardClient({
+          ...mock.config,
+          region: 'us',
+          regions: ['us'],
+          redirectUri: ctx.config.BLIZZARD_REDIRECT_URI,
+        });
+        const token = await client.fetchClientCredentialsToken();
+        const index = await client.fetchItemSetIndex(token, 'us');
+        expect((index.item_sets ?? []).map((s) => s.id).sort()).toEqual([493, 521, 523]);
+
+        // Drive the same upsert path the CLI uses
+        const { manualClassesForSet } = await import('../src/items/set-classes.js');
+        for (const entry of index.item_sets ?? []) {
+          const detail = await client.fetchItemSet(token, entry.id, 'us');
+          expect(detail).toBeTruthy();
+          const itemIds = (detail!.items ?? []).map((i) => i.id!).filter(Boolean);
+          let allowed: string[] | null = null;
+          let classSource: 'items' | 'manual' | null = null;
+          const dbClasses = await ctx.pool.query<{ allowed_classes: string[] | null }>(
+            `SELECT allowed_classes FROM forever_items WHERE item_id = ANY($1::bigint[]) AND allowed_classes IS NOT NULL`,
+            [itemIds],
+          );
+          const derived = new Set<string>();
+          for (const row of dbClasses.rows) {
+            for (const c of row.allowed_classes ?? []) derived.add(c);
+          }
+          if (derived.size) {
+            allowed = [...derived].sort();
+            classSource = 'items';
+          } else {
+            const manual = manualClassesForSet(entry.id);
+            if (manual) {
+              allowed = [...manual];
+              classSource = 'manual';
+            }
+          }
+          await items.upsertItemSet(ctx.pool, {
+            id: entry.id,
+            name: detail!.name ?? entry.name ?? `Set ${entry.id}`,
+            effects: detail!.effects ?? null,
+            allowedClasses: allowed,
+            classSource,
+            buildId: 'sets-only-test',
+            itemIds,
+          });
+        }
+        const genesis = await items.getItemSet(ctx.pool, 493);
+        expect(genesis).toMatchObject({ allowed_classes: ['druid'], class_source: 'items' });
+        const dream = await items.getItemSet(ctx.pool, 521);
+        expect(dream).toMatchObject({ allowed_classes: ['druid'], class_source: 'manual' });
+        const dread = await items.getItemSet(ctx.pool, 523);
+        expect(dread).toMatchObject({ allowed_classes: ['warrior'], class_source: 'manual' });
+        expect(await items.countItemSets(ctx.pool)).toBe(3);
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+  });
+  

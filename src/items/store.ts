@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from '../db/pool.js';
 import type { GearSlot } from '../gear/schema.js';
 import { sanitizeBlizzardIconUrl } from '../lib/icon-url.js';
+import { classEquipSql, junkExclusionSql } from './equip-rules.js';
+import { isPlayableClass, type PlayableClass } from './playable-classes.js';
 
 export type Db = Pool | PoolClient;
 
@@ -17,6 +19,10 @@ export type ForeverItemRow = {
   armor_type: string | null;
   item_class: number | null;
   item_subclass: number | null;
+  allowed_classes: string[] | null;
+  item_set_id: number | null;
+  /** Present on list/get when joined; effective = item's own or set's. */
+  effective_allowed_classes?: string[] | null;
   stats: unknown;
   icon_url: string | null;
   icon_name: string | null;
@@ -36,6 +42,9 @@ export type ForeverItemWire = {
   item_level: number;
   required_level: number;
   armor_type: string | null;
+  item_class: number | null;
+  item_subclass: number | null;
+  allowed_classes: string[] | null;
   stats: { type: string; value: number }[] | null;
   icon_url: string | null;
   source: 'blizzard_forever';
@@ -56,6 +65,8 @@ export type UpsertItemInput = {
   armorType: string | null;
   itemClass: number | null;
   itemSubclass: number | null;
+  allowedClasses?: string[] | null;
+  itemSetId?: number | null;
   stats: ItemStat[] | null;
   iconUrl: string | null;
   iconName: string | null;
@@ -64,18 +75,23 @@ export type UpsertItemInput = {
 
 export type ListItemsFilters = {
   slot?: GearSlot;
-  /** armor_type filter (cloth|leather|mail|plate); wire query may be `class` or `armor_type`. */
+  /** Playable class filter (warrior|…|druid) — applies full equip rules. */
+  playableClass?: string;
+  /** armor_type filter (cloth|leather|mail|plate). */
   armorType?: string;
   q?: string;
   minItemLevel?: number;
   maxRequiredLevel?: number;
   cursor?: string;
   limit?: number;
+  /** When false, skip junk-name exclusion. Default true. */
+  excludeJunk?: boolean;
 };
 
 export type ForeverItemsMeta = {
   build_id: string;
   item_count: number;
+  set_count: number;
   region: string;
   imported_at: Date;
   updated_at: Date;
@@ -109,7 +125,16 @@ function mapStats(raw: unknown): ItemStat[] | null {
   return out.length ? out : null;
 }
 
+export function effectiveAllowedClasses(row: ForeverItemRow): string[] | null {
+  const own = row.allowed_classes;
+  if (own && own.length > 0) return own;
+  const eff = row.effective_allowed_classes;
+  if (eff && eff.length > 0) return eff;
+  return own && own.length === 0 ? [] : eff ?? own ?? null;
+}
+
 export function toWire(row: ForeverItemRow): ForeverItemWire {
+  const allowed = effectiveAllowedClasses(row);
   return {
     item_id: Number(row.item_id),
     name: row.name,
@@ -119,6 +144,9 @@ export function toWire(row: ForeverItemRow): ForeverItemWire {
     item_level: row.item_level,
     required_level: row.required_level,
     armor_type: row.armor_type,
+    item_class: row.item_class,
+    item_subclass: row.item_subclass,
+    allowed_classes: allowed && allowed.length > 0 ? allowed : null,
     stats: mapStats(row.stats),
     icon_url: sanitizeBlizzardIconUrl(row.icon_url),
     source: 'blizzard_forever',
@@ -128,12 +156,14 @@ export function toWire(row: ForeverItemRow): ForeverItemWire {
 
 export async function getMeta(db: Db): Promise<ForeverItemsMeta> {
   const res = await db.query<ForeverItemsMeta>(
-    `SELECT build_id, item_count, region, imported_at, updated_at FROM forever_items_meta WHERE id = 1`,
+    `SELECT build_id, item_count, COALESCE(set_count, 0)::int AS set_count, region, imported_at, updated_at
+     FROM forever_items_meta WHERE id = 1`,
   );
   return (
     res.rows[0] ?? {
       build_id: 'empty',
       item_count: 0,
+      set_count: 0,
       region: 'us',
       imported_at: new Date(0),
       updated_at: new Date(0),
@@ -162,7 +192,14 @@ export async function itemExists(db: Db, itemId: number): Promise<boolean> {
 
 export async function getItem(db: Db, itemId: number): Promise<ForeverItemRow | null> {
   const res = await db.query<ForeverItemRow>(
-    `SELECT * FROM forever_items WHERE item_id = $1`,
+    `SELECT i.*,
+            COALESCE(
+              NULLIF(i.allowed_classes, '{}'),
+              s.allowed_classes
+            ) AS effective_allowed_classes
+     FROM forever_items i
+     LEFT JOIN forever_item_sets s ON s.id = i.item_set_id
+     WHERE i.item_id = $1`,
     [itemId],
   );
   return res.rows[0] ?? null;
@@ -172,11 +209,13 @@ export async function upsertItem(db: Db, input: UpsertItemInput): Promise<void> 
   await db.query(
     `INSERT INTO forever_items (
        item_id, name, slot, slot_aliases, inventory_type, quality, item_level, required_level,
-       armor_type, item_class, item_subclass, stats, icon_url, icon_name, source, verified, region,
+       armor_type, item_class, item_subclass, allowed_classes, item_set_id,
+       stats, icon_url, icon_name, source, verified, region,
        imported_at, updated_at
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,
-       $9,$10,$11,$12::jsonb,$13,$14,'blizzard_forever',TRUE,$15,
+       $9,$10,$11,$12,$13,
+       $14::jsonb,$15,$16,'blizzard_forever',TRUE,$17,
        now(), now()
      )
      ON CONFLICT (item_id) DO UPDATE SET
@@ -190,6 +229,8 @@ export async function upsertItem(db: Db, input: UpsertItemInput): Promise<void> 
        armor_type = EXCLUDED.armor_type,
        item_class = EXCLUDED.item_class,
        item_subclass = EXCLUDED.item_subclass,
+       allowed_classes = EXCLUDED.allowed_classes,
+       item_set_id = EXCLUDED.item_set_id,
        stats = EXCLUDED.stats,
        icon_url = EXCLUDED.icon_url,
        icon_name = EXCLUDED.icon_name,
@@ -209,6 +250,8 @@ export async function upsertItem(db: Db, input: UpsertItemInput): Promise<void> 
       input.armorType,
       input.itemClass,
       input.itemSubclass,
+      input.allowedClasses ?? null,
+      input.itemSetId ?? null,
       JSON.stringify(input.stats),
       sanitizeBlizzardIconUrl(input.iconUrl),
       input.iconName,
@@ -219,19 +262,78 @@ export async function upsertItem(db: Db, input: UpsertItemInput): Promise<void> 
 
 export async function setMeta(
   db: Db,
-  args: { buildId: string; itemCount: number; region: string },
+  args: { buildId: string; itemCount: number; region: string; setCount?: number },
 ): Promise<void> {
   await db.query(
-    `INSERT INTO forever_items_meta (id, build_id, item_count, region, imported_at, updated_at)
-     VALUES (1, $1, $2, $3, now(), now())
+    `INSERT INTO forever_items_meta (id, build_id, item_count, set_count, region, imported_at, updated_at)
+     VALUES (1, $1, $2, $3, $4, now(), now())
      ON CONFLICT (id) DO UPDATE SET
        build_id = EXCLUDED.build_id,
        item_count = EXCLUDED.item_count,
+       set_count = EXCLUDED.set_count,
        region = EXCLUDED.region,
        imported_at = now(),
        updated_at = now()`,
-    [args.buildId, args.itemCount, args.region],
+    [args.buildId, args.itemCount, args.setCount ?? 0, args.region],
   );
+}
+
+export type UpsertItemSetInput = {
+  id: number;
+  name: string;
+  effects: unknown;
+  allowedClasses: string[] | null;
+  classSource: 'items' | 'inferred' | 'manual' | null;
+  buildId: string;
+  itemIds: number[];
+};
+
+export async function upsertItemSet(db: Db, input: UpsertItemSetInput): Promise<void> {
+  await db.query(
+    `INSERT INTO forever_item_sets (id, name, effects, allowed_classes, class_source, build_id, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, $5, $6, now())
+     ON CONFLICT (id) DO UPDATE SET
+       name = EXCLUDED.name,
+       effects = EXCLUDED.effects,
+       allowed_classes = EXCLUDED.allowed_classes,
+       class_source = EXCLUDED.class_source,
+       build_id = EXCLUDED.build_id,
+       updated_at = now()`,
+    [
+      input.id,
+      input.name,
+      JSON.stringify(input.effects ?? null),
+      input.allowedClasses,
+      input.classSource,
+      input.buildId,
+    ],
+  );
+  await db.query(`DELETE FROM forever_item_set_items WHERE set_id = $1`, [input.id]);
+  for (const itemId of input.itemIds) {
+    await db.query(
+      `INSERT INTO forever_item_set_items (set_id, item_id) VALUES ($1, $2)
+       ON CONFLICT (set_id, item_id) DO NOTHING`,
+      [input.id, itemId],
+    );
+  }
+}
+
+export async function countItemSets(db: Db): Promise<number> {
+  const res = await db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM forever_item_sets`);
+  return Number(res.rows[0]?.n ?? 0);
+}
+
+export async function getItemSet(
+  db: Db,
+  setId: number,
+): Promise<{ id: number; name: string; allowed_classes: string[] | null; class_source: string | null } | null> {
+  const res = await db.query<{
+    id: number;
+    name: string;
+    allowed_classes: string[] | null;
+    class_source: string | null;
+  }>(`SELECT id, name, allowed_classes, class_source FROM forever_item_sets WHERE id = $1`, [setId]);
+  return res.rows[0] ?? null;
 }
 
 function escapeLikePattern(raw: string): string {
@@ -247,39 +349,66 @@ export async function listItems(
   const params: unknown[] = [];
   const where: string[] = [];
 
+  const effectiveClassesExpr =
+    `COALESCE(NULLIF(i.allowed_classes, '{}'), s.allowed_classes)`;
+
+  if (filters.excludeJunk !== false) {
+    where.push(junkExclusionSql('i.name'));
+  }
   if (filters.slot) {
     params.push(filters.slot);
-    where.push(`(slot = $${params.length} OR $${params.length} = ANY(slot_aliases))`);
+    where.push(`(i.slot = $${params.length} OR $${params.length} = ANY(i.slot_aliases))`);
   }
   if (filters.armorType) {
     params.push(filters.armorType);
-    where.push(`armor_type = $${params.length}`);
+    where.push(`i.armor_type = $${params.length}`);
   }
   if (filters.q && filters.q.trim()) {
     params.push(`%${escapeLikePattern(filters.q.trim().toLowerCase())}%`);
-    where.push(`lower(name) LIKE $${params.length} ESCAPE '\\'`);
+    where.push(`lower(i.name) LIKE $${params.length} ESCAPE '\\'`);
   }
   if (filters.minItemLevel != null) {
     params.push(filters.minItemLevel);
-    where.push(`item_level >= $${params.length}`);
+    where.push(`i.item_level >= $${params.length}`);
   }
   if (filters.maxRequiredLevel != null) {
     params.push(filters.maxRequiredLevel);
-    where.push(`required_level <= $${params.length}`);
+    where.push(`i.required_level <= $${params.length}`);
+  }
+  if (filters.playableClass) {
+    if (!isPlayableClass(filters.playableClass)) {
+      throw new Error('bad_class');
+    }
+    const frag = classEquipSql(
+      filters.playableClass as PlayableClass,
+      filters.slot,
+      params.length + 1,
+    );
+    const sql = frag.sql
+      .replace(/\barmor_type\b/g, 'i.armor_type')
+      .replace(/\binventory_type\b/g, 'i.inventory_type')
+      .replace(/\bitem_class\b/g, 'i.item_class')
+      .replace(/\bitem_subclass\b/g, 'i.item_subclass')
+      .replace(/\beffective_allowed_classes\b/g, effectiveClassesExpr);
+    where.push(sql);
+    params.push(...frag.params);
   }
   if (filters.cursor) {
     const after = decodeCursor(filters.cursor);
     if (after == null) throw new Error('bad_cursor');
     params.push(after);
-    where.push(`item_id > $${params.length}`);
+    where.push(`i.item_id > $${params.length}`);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   params.push(limit + 1);
   const res = await db.query<ForeverItemRow>(
-    `SELECT * FROM forever_items
+    `SELECT i.*,
+            ${effectiveClassesExpr} AS effective_allowed_classes
+     FROM forever_items i
+     LEFT JOIN forever_item_sets s ON s.id = i.item_set_id
      ${whereSql}
-     ORDER BY item_id ASC
+     ORDER BY i.item_id ASC
      LIMIT $${params.length}`,
     params,
   );

@@ -1227,20 +1227,24 @@ paths:
       operationId: listItems
       summary: Search Forever item catalog by slot
       description: |
-        Public Forever item catalog for the armory picker (platform#39). Data imported from
-        Blizzard `static-forever-{region}` only — never classic/retail. `class` filters by
-        armor type (cloth|leather|mail|plate). `/items/search` is an alias of this handler.
+        Public Forever item catalog for the armory picker (platform#39 / #78). Data imported from
+        Blizzard `static-forever-{region}` only — never classic/retail.
+        `class` is a playable class (warrior|…|druid) and applies the full equip-rules engine
+        (armor tier, weapon subclasses, off-hand / dual-wield, shields, relics, ammo, class-set
+        ownership). `armor_type` remains an independent cloth|leather|mail|plate filter; both
+        may be combined. Junk names (Monster, Test/(TEST), [PH], Deprecated, AHNQIRAJ TEST)
+        are excluded by default. `/items/search` is an alias of this handler.
       parameters:
         - name: slot
           in: query
           schema: { $ref: '#/components/schemas/GearSlot' }
         - name: class
           in: query
-          description: Armor type filter (alias of `armor_type`)
-          schema: { type: string, enum: [cloth, leather, mail, plate] }
+          description: Playable class filter (applies full equip rules)
+          schema: { $ref: '#/components/schemas/WowClass' }
         - name: armor_type
           in: query
-          description: Armor type filter (alias of `class`)
+          description: Armor type filter (independent of `class`)
           schema: { type: string, enum: [cloth, leather, mail, plate] }
         - name: q
           in: query
@@ -1283,18 +1287,18 @@ paths:
       tags: [gear]
       operationId: searchItems
       summary: Alias of GET /items (Forever catalog)
-      description: Same handler as `GET /api/v1/items` (platform#39).
+      description: Same handler as `GET /api/v1/items` (platform#39 / #78).
       parameters:
         - name: slot
           in: query
           schema: { $ref: '#/components/schemas/GearSlot' }
         - name: class
           in: query
-          description: Armor type filter (alias of `armor_type`)
-          schema: { type: string, enum: [cloth, leather, mail, plate] }
+          description: Playable class filter (applies full equip rules)
+          schema: { $ref: '#/components/schemas/WowClass' }
         - name: armor_type
           in: query
-          description: Armor type filter (alias of `class`)
+          description: Armor type filter (independent of `class`)
           schema: { type: string, enum: [cloth, leather, mail, plate] }
         - name: q
           in: query
@@ -2173,7 +2177,7 @@ components:
         run_id: { type: [string, 'null'], format: uuid }
     ForeverItem:
       type: object
-      required: [item_id, name, slot, inventory_type, quality, item_level, required_level, armor_type, stats, icon_url, source, verified]
+      required: [item_id, name, slot, inventory_type, quality, item_level, required_level, armor_type, item_class, item_subclass, allowed_classes, stats, icon_url, source, verified]
       properties:
         item_id: { type: integer, minimum: 1 }
         name: { type: string }
@@ -2183,6 +2187,12 @@ components:
         item_level: { type: integer }
         required_level: { type: integer }
         armor_type: { type: [string, 'null'], enum: [cloth, leather, mail, plate, null] }
+        item_class: { type: [integer, 'null'], description: Blizzard item_class.id }
+        item_subclass: { type: [integer, 'null'], description: Blizzard item_subclass.id }
+        allowed_classes:
+          type: [array, 'null']
+          description: Effective class restriction (item's own playable_classes, else its set's). Null means unrestricted.
+          items: { $ref: '#/components/schemas/WowClass' }
         stats:
           type: [array, 'null']
           items:

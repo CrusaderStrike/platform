@@ -140,6 +140,355 @@ const FIXTURE_FOREVER_ITEMS = [
     },
     icon: 'inv_helmet_03',
   },
+  // AQ40 Genesis (Druid) — tagged class set
+  {
+    id: 21355,
+    name: 'Genesis Boots',
+    inventory_type: { type: 'FEET', name: 'Feet' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 78,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 2, name: 'Leather' },
+    preview_item: {
+      stats: [{ type: { type: 'INTELLECT', name: 'Intellect' }, value: 20 }],
+      requirements: {
+        playable_classes: {
+          links: [{ id: 11, name: 'Druid' }],
+          display_string: 'Classes: Druid',
+        },
+      },
+      set: { item_set: { id: 493, name: 'Genesis Raiment' } },
+    },
+    icon: 'inv_boots_08',
+  },
+  {
+    id: 21353,
+    name: 'Genesis Helm',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 81,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 2, name: 'Leather' },
+    preview_item: {
+      requirements: {
+        playable_classes: {
+          links: [{ id: 11, name: 'Druid' }],
+          display_string: 'Classes: Druid',
+        },
+      },
+      set: { item_set: { id: 493, name: 'Genesis Raiment' } },
+    },
+    icon: 'inv_helmet_42',
+  },
+  // T3 Dreamwalker — untagged; class from manual map
+  {
+    id: 22490,
+    name: 'Dreamwalker Headpiece',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 88,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 2, name: 'Leather' },
+    preview_item: {
+      set: { item_set: { id: 521, name: 'Dreamwalker Raiment' } },
+    },
+    icon: 'inv_helmet_15',
+  },
+  {
+    id: 22488,
+    name: 'Dreamwalker Tunic',
+    inventory_type: { type: 'CHEST', name: 'Chest' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 92,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 2, name: 'Leather' },
+    preview_item: {
+      set: { item_set: { id: 521, name: 'Dreamwalker Raiment' } },
+    },
+    icon: 'inv_chest_leather_08',
+  },
+  // T3 Dreadnaught — untagged warrior
+  {
+    id: 22418,
+    name: 'Dreadnaught Helmet',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 88,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 4, name: 'Plate' },
+    preview_item: {
+      set: { item_set: { id: 523, name: "Dreadnaught's Battlegear" } },
+    },
+    icon: 'inv_helmet_58',
+  },
+  // Weapons / off-hand / ranged / ammo / relics / junk
+  {
+    id: 1935,
+    name: 'Assassin\'s Blade',
+    inventory_type: { type: 'WEAPON', name: 'One-Hand' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 24,
+    required_level: 19,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 15, name: 'Dagger' },
+    preview_item: { stats: [] },
+    icon: 'inv_weapon_shortblade_15',
+  },
+  {
+    id: 19362,
+    name: 'Doom\'s Edge',
+    inventory_type: { type: 'WEAPONMAINHAND', name: 'Main Hand' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 70,
+    required_level: 60,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 0, name: 'Axe' },
+    preview_item: { stats: [] },
+    icon: 'inv_axe_15',
+  },
+  {
+    id: 19348,
+    name: 'Red Dragonscale Protector',
+    inventory_type: { type: 'SHIELD', name: 'Shield' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 74,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 6, name: 'Shield' },
+    preview_item: { stats: [] },
+    icon: 'inv_shield_18',
+  },
+  {
+    id: 19366,
+    name: 'Master Dragonslayer\'s Orb',
+    inventory_type: { type: 'HOLDABLE', name: 'Held In Off-hand' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 83,
+    required_level: 60,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 0, name: 'Miscellaneous' },
+    preview_item: { stats: [] },
+    icon: 'inv_misc_orb_03',
+  },
+  {
+    id: 18737,
+    name: 'Bone Slicing Hatchet',
+    inventory_type: { type: 'WEAPONOFFHAND', name: 'Off Hand' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 0, name: 'Axe' },
+    preview_item: { stats: [] },
+    icon: 'inv_axe_11',
+  },
+  {
+    id: 17074,
+    name: 'Shadowstrike',
+    inventory_type: { type: 'TWOHWEAPON', name: 'Two-Hand' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 63,
+    required_level: 58,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 6, name: 'Polearm' },
+    preview_item: { stats: [] },
+    icon: 'inv_spear_08',
+  },
+  {
+    id: 18755,
+    name: 'Xorothian Firestick',
+    inventory_type: { type: 'RANGEDRIGHT', name: 'Gun' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 3, name: 'Gun' },
+    preview_item: { stats: [] },
+    icon: 'inv_weapon_rifle_07',
+  },
+  {
+    id: 18842,
+    name: 'Staff of Dominance',
+    inventory_type: { type: 'TWOHWEAPON', name: 'Two-Hand' },
+    quality: { type: 'EPIC', name: 'Epic' },
+    level: 70,
+    required_level: 60,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 10, name: 'Staff' },
+    preview_item: { stats: [] },
+    icon: 'inv_staff_32',
+  },
+  {
+    id: 11263,
+    name: 'Nether Force Wand',
+    inventory_type: { type: 'RANGEDRIGHT', name: 'Wand' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 40,
+    required_level: 35,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 19, name: 'Wand' },
+    preview_item: { stats: [] },
+    icon: 'inv_wand_07',
+  },
+  {
+    id: 22397,
+    name: 'Idol of Ferocity',
+    inventory_type: { type: 'RELIC', name: 'Relic' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 8, name: 'Idol' },
+    preview_item: { stats: [] },
+    icon: 'inv_relics_idolofferocity',
+  },
+  {
+    id: 22398,
+    name: 'Idol of Rejuvenation',
+    inventory_type: { type: 'RELIC', name: 'Relic' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 8, name: 'Idol' },
+    preview_item: { stats: [] },
+    icon: 'inv_relics_idolofrejuvenation',
+  },
+  {
+    id: 22399,
+    name: 'Libram of Truth',
+    inventory_type: { type: 'RELIC', name: 'Relic' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 7, name: 'Libram' },
+    preview_item: { stats: [] },
+    icon: 'inv_relics_libramoftruth',
+  },
+  {
+    id: 22396,
+    name: 'Totem of Life',
+    inventory_type: { type: 'RELIC', name: 'Relic' },
+    quality: { type: 'RARE', name: 'Rare' },
+    level: 62,
+    required_level: 57,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 9, name: 'Totem' },
+    preview_item: { stats: [] },
+    icon: 'inv_relics_totemoflife',
+  },
+  {
+    id: 2512,
+    name: 'Rough Arrow',
+    inventory_type: { type: 'AMMO', name: 'Ammo' },
+    quality: { type: 'COMMON', name: 'Common' },
+    level: 5,
+    required_level: 1,
+    item_class: { id: 6, name: 'Projectile' },
+    item_subclass: { id: 2, name: 'Arrow' },
+    preview_item: { stats: [] },
+    icon: 'inv_ammo_arrow_01',
+  },
+  {
+    id: 2516,
+    name: 'Light Shot',
+    inventory_type: { type: 'AMMO', name: 'Ammo' },
+    quality: { type: 'COMMON', name: 'Common' },
+    level: 5,
+    required_level: 1,
+    item_class: { id: 6, name: 'Projectile' },
+    item_subclass: { id: 3, name: 'Bullet' },
+    preview_item: { stats: [] },
+    icon: 'inv_ammo_bullet_02',
+  },
+  {
+    id: 19082,
+    name: 'Monster - Fire Arrow',
+    inventory_type: { type: 'AMMO', name: 'Ammo' },
+    quality: { type: 'COMMON', name: 'Common' },
+    level: 1,
+    required_level: 0,
+    item_class: { id: 6, name: 'Projectile' },
+    item_subclass: { id: 2, name: 'Arrow' },
+    preview_item: { stats: [] },
+    icon: 'inv_ammo_arrow_02',
+  },
+  {
+    id: 19286,
+    name: 'Fast Test Ammo',
+    inventory_type: { type: 'AMMO', name: 'Ammo' },
+    quality: { type: 'COMMON', name: 'Common' },
+    level: 1,
+    required_level: 0,
+    item_class: { id: 6, name: 'Projectile' },
+    item_subclass: { id: 2, name: 'Arrow' },
+    preview_item: { stats: [] },
+    icon: 'inv_ammo_arrow_02',
+  },
+  {
+    id: 99901,
+    name: '[PH] Deprecated Cloth Helm',
+    inventory_type: { type: 'HEAD', name: 'Head' },
+    quality: { type: 'POOR', name: 'Poor' },
+    level: 1,
+    required_level: 0,
+    item_class: { id: 4, name: 'Armor' },
+    item_subclass: { id: 1, name: 'Cloth' },
+    preview_item: { stats: [] },
+    icon: 'inv_helmet_01',
+  },
+  {
+    id: 99902,
+    name: 'AHNQIRAJ TEST Sword',
+    inventory_type: { type: 'WEAPON', name: 'One-Hand' },
+    quality: { type: 'POOR', name: 'Poor' },
+    level: 1,
+    required_level: 0,
+    item_class: { id: 2, name: 'Weapon' },
+    item_subclass: { id: 7, name: 'Sword' },
+    preview_item: { stats: [] },
+    icon: 'inv_sword_04',
+  },
+];
+
+const FIXTURE_ITEM_SETS = [
+  {
+    id: 493,
+    name: 'Genesis Raiment',
+    items: [
+      { id: 21355, name: 'Genesis Boots' },
+      { id: 21353, name: 'Genesis Helm' },
+      { id: 21354, name: 'Genesis Shoulderpads' },
+      { id: 21356, name: 'Genesis Trousers' },
+      { id: 21357, name: 'Genesis Vest' },
+    ],
+    effects: [{ display_string: '(3) Set: Increased Defense +15.', required_count: 3 }],
+  },
+  {
+    id: 521,
+    name: 'Dreamwalker Raiment',
+    items: [
+      { id: 22490, name: 'Dreamwalker Headpiece' },
+      { id: 22488, name: 'Dreamwalker Tunic' },
+      { id: 22492, name: 'Dreamwalker Boots' },
+    ],
+    effects: [{ display_string: 'Set: Your Rejuvenation ticks have a chance to restore mana.', required_count: 2 }],
+  },
+  {
+    id: 523,
+    name: "Dreadnaught's Battlegear",
+    items: [
+      { id: 22418, name: 'Dreadnaught Helmet' },
+      { id: 22416, name: 'Dreadnaught Breastplate' },
+    ],
+    effects: [{ display_string: 'Set: Increases your chance to dodge.', required_count: 2 }],
+  },
 ];
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -426,6 +775,58 @@ export async function startMockBlizzard(
         send(res, 200, {
           assets: [{ key: 'icon', value }],
         });
+        return;
+      }
+
+
+      if (req.method === 'GET' && url.pathname === '/data/wow/item-set/index') {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic') || !ns.startsWith('static-forever-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        send(res, 200, {
+          item_sets: FIXTURE_ITEM_SETS.map((s) => ({ id: s.id, name: s.name })),
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/data/wow/item-set/')) {
+        if (options.failUpstream) {
+          send(res, 503, { error: 'unavailable' });
+          return;
+        }
+        const auth = req.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || !tokens.has(auth.slice(7))) {
+          send(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        const ns = url.searchParams.get('namespace') ?? '';
+        if (ns.toLowerCase().includes('classic') || !ns.startsWith('static-forever-')) {
+          send(res, 403, { error: 'wrong_namespace' });
+          return;
+        }
+        const idStr = url.pathname.split('/').pop() ?? '';
+        if (idStr === 'index') {
+          send(res, 404, { error: 'not_found' });
+          return;
+        }
+        const setId = Number(idStr);
+        const set = FIXTURE_ITEM_SETS.find((s) => s.id === setId);
+        if (!set) {
+          send(res, 404, { code: 404 });
+          return;
+        }
+        send(res, 200, set);
         return;
       }
 

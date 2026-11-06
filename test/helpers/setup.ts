@@ -106,7 +106,7 @@ export async function startTestApp(opts?: {
   await pool.query(`
     TRUNCATE public_api_rate_limits, upload_rate_limits, gear_write_rate_limits, pvp_battlegrounds, pvp_world_events, dungeon_runs,
              gear_op_noop_ids, gear_list_events, gear_list_items, gear_lists, guild_members, guilds,
-             forever_items, forever_items_meta, item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
+             forever_item_set_items, forever_item_sets, forever_items, forever_items_meta, item_icon_cache, character_gear, character_selections, characters, sessions, oauth_states, users CASCADE
   `);
   await pool.query(`INSERT INTO forever_items_meta (id, build_id, item_count) VALUES (1, 'empty', 0) ON CONFLICT (id) DO NOTHING`);
 
