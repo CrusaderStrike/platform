@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from '../db/pool.js';
 import { AppError } from '../lib/errors.js';
-import { GEAR_SLOTS, type GearSlot } from '../gear/schema.js';
+import { type GearSlot } from '../gear/schema.js';
 import { isArmorType, isGearSlot } from '../items/mapping.js';
+import { isPlayableClass } from '../items/playable-classes.js';
 import * as items from '../items/store.js';
 import { checkPublicRateLimit } from '../guilds/rate-limit.js';
 
@@ -81,14 +82,25 @@ function parseSlot(raw: unknown): GearSlot | undefined {
   return v;
 }
 
-/** `class` (Web) or `armor_type` → cloth|leather|mail|plate. */
-function parseArmorClass(q: Record<string, unknown>): string | undefined {
-  const raw = q.class ?? q.armor_type;
+/** Playable class filter: warrior|paladin|…|druid. */
+function parsePlayableClass(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const v = String(raw).toLowerCase();
+  if (!isPlayableClass(v)) {
+    throw new AppError(400, 'validation_error', 'Invalid class.', {
+      class: 'Must be warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, or druid.',
+    });
+  }
+  return v;
+}
+
+/** Armor type filter: cloth|leather|mail|plate. */
+function parseArmorType(raw: unknown): string | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
   const v = String(raw).toLowerCase();
   if (!isArmorType(v)) {
-    throw new AppError(400, 'validation_error', 'Invalid class.', {
-      class: 'Must be cloth, leather, mail, or plate.',
+    throw new AppError(400, 'validation_error', 'Invalid armor_type.', {
+      armor_type: 'Must be cloth, leather, mail, or plate.',
     });
   }
   return v;
@@ -104,7 +116,8 @@ export async function registerItemsRoutes(
     await enforceItemsRate(pool, req, reply);
     const q = req.query as Record<string, unknown>;
     const slot = parseSlot(q.slot);
-    const armorType = parseArmorClass(q);
+    const playableClass = parsePlayableClass(q.class);
+    const armorType = parseArmorType(q.armor_type);
     const minItemLevel = parseOptionalInt(q.min_item_level ?? q.min_ilvl, 'min_item_level', 0, 1000);
     const maxRequiredLevel = parseOptionalInt(
       q.max_required_level ?? q.max_req_level,
@@ -128,6 +141,7 @@ export async function registerItemsRoutes(
     try {
       page = await items.listItems(pool, {
         slot,
+        playableClass,
         armorType,
         q: qText,
         minItemLevel,
@@ -139,6 +153,11 @@ export async function registerItemsRoutes(
       if (err instanceof Error && err.message === 'bad_cursor') {
         throw new AppError(400, 'validation_error', 'Invalid cursor.', {
           cursor: 'Invalid cursor.',
+        });
+      }
+      if (err instanceof Error && err.message === 'bad_class') {
+        throw new AppError(400, 'validation_error', 'Invalid class.', {
+          class: 'Must be warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, or druid.',
         });
       }
       throw err;

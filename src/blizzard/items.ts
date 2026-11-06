@@ -10,6 +10,11 @@ export type BlizzardPreviewStat = {
   value?: number;
 };
 
+export type BlizzardPlayableClassLink = {
+  id?: number;
+  name?: string;
+};
+
 export type BlizzardItem = {
   id: number;
   name?: string;
@@ -23,7 +28,31 @@ export type BlizzardItem = {
     stats?: BlizzardPreviewStat[];
     level?: { value?: number };
     require?: { level?: { value?: number } };
+    requirements?: {
+      level?: { value?: number; display_string?: string };
+      playable_classes?: {
+        links?: BlizzardPlayableClassLink[];
+        display_string?: string;
+      };
+    };
+    set?: {
+      item_set?: { id?: number; name?: string };
+      items?: Array<{ item?: { id?: number; name?: string }; id?: number }>;
+      effects?: Array<{ display_string?: string; required_count?: number }>;
+      display_string?: string;
+    };
   };
+};
+
+export type BlizzardItemSetIndex = {
+  item_sets?: Array<{ id: number; name?: string }>;
+};
+
+export type BlizzardItemSet = {
+  id: number;
+  name?: string;
+  items?: Array<{ id?: number; name?: string }>;
+  effects?: Array<{ display_string?: string; required_count?: number }>;
 };
 
 export type BlizzardItemMedia = {

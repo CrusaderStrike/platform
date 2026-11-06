@@ -16,6 +16,8 @@ import type {
   BlizzardItem,
   BlizzardItemMedia,
   BlizzardItemSearchPage,
+  BlizzardItemSet,
+  BlizzardItemSetIndex,
 } from './items.js';
 
 export type BlizzardClientConfig = {
@@ -76,6 +78,17 @@ export type BlizzardClient = {
       region?: BlizzardRegion;
     },
   ): Promise<BlizzardItemSearchPage>;
+  /** Forever item-set index (`/data/wow/item-set/index`). */
+  fetchItemSetIndex(
+    accessToken: string,
+    region?: BlizzardRegion,
+  ): Promise<BlizzardItemSetIndex>;
+  /** Forever item-set detail. */
+  fetchItemSet(
+    accessToken: string,
+    setId: number,
+    region?: BlizzardRegion,
+  ): Promise<BlizzardItemSet | null>;
 };
 
 function mapFaction(raw?: string | null): 'alliance' | 'horde' | null {
@@ -307,6 +320,45 @@ export function createBlizzardClient(cfg: BlizzardClientConfig): BlizzardClient 
         throw err;
       }
       return (await res.json()) as BlizzardItemSearchPage;
+    },
+
+    async fetchItemSetIndex(accessToken, region = cfg.region) {
+      if (!isBlizzardRegion(region)) return { item_sets: [] };
+      const ns = staticNamespace(region);
+      const url = `${apiBaseFor(region)}/data/wow/item-set/index?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_set_index_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      return (await res.json()) as BlizzardItemSetIndex;
+    },
+
+    async fetchItemSet(accessToken, setId, region = cfg.region) {
+      if (!isBlizzardRegion(region)) return null;
+      const ns = staticNamespace(region);
+      const url = `${apiBaseFor(region)}/data/wow/item-set/${setId}?namespace=${encodeURIComponent(ns)}&locale=en_US`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'Battlenet-Namespace': ns,
+        },
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        const err = new Error(`blizzard_item_set_${res.status}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      return (await res.json()) as BlizzardItemSet;
     },
   };
 }
