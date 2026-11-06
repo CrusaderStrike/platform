@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   classCanEquip,
   classCanEquipInOffHand,
+  classAllowsGenericWeaponInOffHand,
+  ALLOW_GENERIC_WEAPON_IN_OFFHAND,
   isJunkItemName,
   armorTypesForClass,
   weaponSubclassesForClass,
@@ -154,13 +156,45 @@ describe('weapons, off-hand, shields, held', () => {
     expect(weaponSubclassesForClass('hunter').has(WEAPON_SUB.BOW)).toBe(true);
   });
 
-  it('gates dual-wield and main-hand-only in off_hand', () => {
+  it('gates generic WEAPON dual-wield and never allows MH-only / 2H in off_hand', () => {
+    expect(ALLOW_GENERIC_WEAPON_IN_OFFHAND).toBe(true);
     expect(canDualWield('rogue')).toBe(true);
     expect(canDualWield('mage')).toBe(false);
+    expect(classAllowsGenericWeaponInOffHand('rogue')).toBe(true);
+    expect(classAllowsGenericWeaponInOffHand('mage')).toBe(false);
     expect(classCanEquipInOffHand('rogue', dagger)).toBe(true);
     expect(classCanEquipInOffHand('mage', dagger)).toBe(false);
     expect(classCanEquipInOffHand('warrior', mhOnly)).toBe(false);
     expect(classCanEquipInOffHand('warrior', staff)).toBe(false);
+  });
+
+  it('WEAPONOFFHAND and HOLDABLE are equippable by every class with no weapon-skill check', () => {
+    const ohSword = item({
+      name: 'Offhand Sword of the Mage',
+      inventoryType: 'WEAPONOFFHAND',
+      itemClass: 2,
+      itemSubclass: WEAPON_SUB.SWORD_1H,
+    });
+    const ohFist = item({
+      name: 'Offhand Fist of the Priest',
+      inventoryType: 'WEAPONOFFHAND',
+      itemClass: 2,
+      itemSubclass: WEAPON_SUB.FIST,
+    });
+    // Fist is not on priest/mage weapon lists; WEAPONOFFHAND still allowed.
+    expect(weaponSubclassesForClass('priest').has(WEAPON_SUB.FIST)).toBe(false);
+    expect(weaponSubclassesForClass('mage').has(WEAPON_SUB.FIST)).toBe(false);
+    for (const cls of PLAYABLE_CLASSES) {
+      expect(classCanEquip(cls, held)).toBe(true);
+      expect(classCanEquip(cls, ohSword)).toBe(true);
+      expect(classCanEquip(cls, ohFist)).toBe(true);
+      expect(classCanEquipInOffHand(cls, held)).toBe(true);
+      expect(classCanEquipInOffHand(cls, ohSword)).toBe(true);
+      expect(classCanEquipInOffHand(cls, ohFist)).toBe(true);
+    }
+    // Mage with an off-hand sword / priest with an off-hand fist (Drew examples).
+    expect(classCanEquipInOffHand('mage', ohSword)).toBe(true);
+    expect(classCanEquipInOffHand('priest', ohFist)).toBe(true);
   });
 
   it('shields only for warrior/paladin/shaman; held for all', () => {
@@ -168,6 +202,8 @@ describe('weapons, off-hand, shields, held', () => {
     expect(canUseShield('druid')).toBe(false);
     expect(classCanEquip('shaman', shield)).toBe(true);
     expect(classCanEquip('rogue', shield)).toBe(false);
+    expect(classCanEquipInOffHand('shaman', shield)).toBe(true);
+    expect(classCanEquipInOffHand('mage', shield)).toBe(false);
     for (const cls of PLAYABLE_CLASSES) {
       expect(classCanEquip(cls, held)).toBe(true);
     }

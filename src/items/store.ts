@@ -309,11 +309,12 @@ export async function upsertItemSet(db: Db, input: UpsertItemSetInput): Promise<
     ],
   );
   await db.query(`DELETE FROM forever_item_set_items WHERE set_id = $1`, [input.id]);
-  for (const itemId of input.itemIds) {
+  if (input.itemIds.length > 0) {
     await db.query(
-      `INSERT INTO forever_item_set_items (set_id, item_id) VALUES ($1, $2)
+      `INSERT INTO forever_item_set_items (set_id, item_id)
+       SELECT $1, UNNEST($2::int[])
        ON CONFLICT (set_id, item_id) DO NOTHING`,
-      [input.id, itemId],
+      [input.id, input.itemIds],
     );
   }
 }
@@ -383,14 +384,15 @@ export async function listItems(
       filters.playableClass as PlayableClass,
       filters.slot,
       params.length + 1,
+      {
+        armorType: 'i.armor_type',
+        inventoryType: 'i.inventory_type',
+        itemClass: 'i.item_class',
+        itemSubclass: 'i.item_subclass',
+        effectiveAllowedClasses: effectiveClassesExpr,
+      },
     );
-    const sql = frag.sql
-      .replace(/\barmor_type\b/g, 'i.armor_type')
-      .replace(/\binventory_type\b/g, 'i.inventory_type')
-      .replace(/\bitem_class\b/g, 'i.item_class')
-      .replace(/\bitem_subclass\b/g, 'i.item_subclass')
-      .replace(/\beffective_allowed_classes\b/g, effectiveClassesExpr);
-    where.push(sql);
+    where.push(frag.sql);
     params.push(...frag.params);
   }
   if (filters.cursor) {
