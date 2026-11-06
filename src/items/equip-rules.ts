@@ -180,6 +180,18 @@ export function canDualWield(cls: PlayableClass): boolean {
   return DUAL_WIELD.has(cls);
 }
 
+/**
+ * Flip this to false if Drew decides generic INVTYPE_WEAPON must never go in the off hand.
+ * When true, warrior/rogue/hunter can put a one-hand WEAPON in off_hand (Classic dual-wield).
+ * WEAPONOFFHAND / HOLDABLE are unaffected — those are always allowed for every class.
+ */
+export const ALLOW_GENERIC_WEAPON_IN_OFFHAND = true;
+
+/** Isolated gate for generic INVTYPE_WEAPON in the off_hand slot. Easy to flip via the constant above. */
+export function classAllowsGenericWeaponInOffHand(cls: PlayableClass): boolean {
+  return ALLOW_GENERIC_WEAPON_IN_OFFHAND && canDualWield(cls);
+}
+
 export function canUseShield(cls: PlayableClass): boolean {
   return SHIELD_CLASSES.has(cls);
 }
@@ -237,8 +249,9 @@ export function classCanEquip(cls: PlayableClass, item: EquipItemView): boolean 
     return canUseShield(cls);
   }
 
-  // Held-in-off-hand (non-weapon, non-shield)
-  if (itype === 'HOLDABLE') {
+  // Off-hand-flagged items: every class, no weapon-skill check (Drew 2026-11-05).
+  // Covers dedicated off-hand weapons (WEAPONOFFHAND) and held-in-off-hand (HOLDABLE).
+  if (itype === 'HOLDABLE' || itype === 'WEAPONOFFHAND') {
     return true;
   }
 
@@ -280,8 +293,11 @@ export function classCanEquip(cls: PlayableClass, item: EquipItemView): boolean 
 }
 
 /**
- * Extra gate when the caller is browsing the off_hand slot: one-hand weapons
- * require dual wield; main-hand-only weapons never appear; shields/held OK per rules.
+ * Extra gate when the caller is browsing the off_hand slot.
+ * - WEAPONOFFHAND / HOLDABLE: every class (no weapon-skill check).
+ * - SHIELD: warrior / paladin / shaman only.
+ * - Generic WEAPON: dual-wield classes only (see classAllowsGenericWeaponInOffHand).
+ * - WEAPONMAINHAND / TWOHWEAPON: never.
  */
 export function classCanEquipInOffHand(cls: PlayableClass, item: EquipItemView): boolean {
   if (!classCanEquip(cls, item)) return false;
@@ -290,7 +306,7 @@ export function classCanEquipInOffHand(cls: PlayableClass, item: EquipItemView):
     return false;
   }
   if (itype === 'WEAPON') {
-    return canDualWield(cls);
+    return classAllowsGenericWeaponInOffHand(cls);
   }
   if (itype === 'SHIELD') return canUseShield(cls);
   if (itype === 'HOLDABLE' || itype === 'WEAPONOFFHAND') return true;
@@ -315,43 +331,63 @@ export function junkExclusionSql(nameColumn = 'name'): string {
   )`;
 }
 
+/** Column identifiers for classEquipSql — pass already-qualified names from the caller. */
+export type EquipSqlColumns = {
+  armorType: string;
+  inventoryType: string;
+  itemClass: string;
+  itemSubclass: string;
+  effectiveAllowedClasses: string;
+};
+
+const DEFAULT_EQUIP_SQL_COLS: EquipSqlColumns = {
+  armorType: 'armor_type',
+  inventoryType: 'inventory_type',
+  itemClass: 'item_class',
+  itemSubclass: 'item_subclass',
+  effectiveAllowedClasses: 'effective_allowed_classes',
+};
+
 /**
- * SQL predicate: item is equippable by `cls` (armor/weapon/relic/ammo + dual-wield off_hand).
- * Assumes columns: name, inventory_type, item_class, item_subclass, armor_type,
- * and `effective_allowed_classes` (text[] | null) already in scope (via JOIN/subquery).
+ * SQL predicate: item is equippable by `cls` (armor/weapon/relic/ammo + off_hand rules).
+ * Pass `cols` with table-qualified identifiers (e.g. `i.item_class`) to avoid brittle rewrites.
  */
 export function classEquipSql(
   cls: PlayableClass,
   slot: string | undefined,
   startParam: number,
+  cols: EquipSqlColumns = DEFAULT_EQUIP_SQL_COLS,
 ): SqlFrag {
   const params: unknown[] = [];
   const parts: string[] = [];
+  const invNorm = `upper(replace(${cols.inventoryType}, ' ', ''))`;
 
   // Class-set ownership
   params.push(cls);
   const classParam = `$${startParam + params.length - 1}`;
   parts.push(
-    `(effective_allowed_classes IS NULL OR cardinality(effective_allowed_classes) = 0 OR ${classParam} = ANY(effective_allowed_classes))`,
+    `(${cols.effectiveAllowedClasses} IS NULL OR cardinality(${cols.effectiveAllowedClasses}) = 0 OR ${classParam} = ANY(${cols.effectiveAllowedClasses}))`,
   );
 
   // Armor tier: when armor_type is set, it must be in the class's allowed set
   const armor = [...armorTypesForClass(cls)];
   params.push(armor);
   const armorParam = `$${startParam + params.length - 1}`;
-  parts.push(`(armor_type IS NULL OR armor_type = ANY(${armorParam}::text[]))`);
+  parts.push(`(${cols.armorType} IS NULL OR ${cols.armorType} = ANY(${armorParam}::text[]))`);
 
   // Shields
   if (!canUseShield(cls)) {
-    parts.push(`(upper(replace(inventory_type, ' ', '')) <> 'SHIELD' AND NOT (item_class = 4 AND item_subclass = 6))`);
+    parts.push(
+      `(${invNorm} <> 'SHIELD' AND NOT (${cols.itemClass} = 4 AND ${cols.itemSubclass} = 6))`,
+    );
   }
 
   // Ammo
   if (!canUseAmmo(cls)) {
-    parts.push(`(upper(replace(inventory_type, ' ', '')) <> 'AMMO' AND item_class IS DISTINCT FROM 6)`);
+    parts.push(`(${invNorm} <> 'AMMO' AND ${cols.itemClass} IS DISTINCT FROM 6)`);
   } else {
     parts.push(
-      `(upper(replace(inventory_type, ' ', '')) <> 'AMMO' AND item_class IS DISTINCT FROM 6 OR item_subclass IS NULL OR item_subclass IN (2, 3))`,
+      `(${invNorm} <> 'AMMO' AND ${cols.itemClass} IS DISTINCT FROM 6 OR ${cols.itemSubclass} IS NULL OR ${cols.itemSubclass} IN (2, 3))`,
     );
   }
 
@@ -359,30 +395,32 @@ export function classEquipSql(
   const relic = relicSubclassForClass(cls);
   if (relic == null) {
     parts.push(
-      `(upper(replace(inventory_type, ' ', '')) <> 'RELIC' AND NOT (item_class = 4 AND item_subclass IN (7, 8, 9)))`,
+      `(${invNorm} <> 'RELIC' AND NOT (${cols.itemClass} = 4 AND ${cols.itemSubclass} IN (7, 8, 9)))`,
     );
   } else {
     params.push(relic);
     const relicParam = `$${startParam + params.length - 1}`;
     parts.push(
       `(
-        (upper(replace(inventory_type, ' ', '')) <> 'RELIC' AND NOT (item_class = 4 AND item_subclass IN (7, 8, 9)))
-        OR item_subclass = ${relicParam}
+        (${invNorm} <> 'RELIC' AND NOT (${cols.itemClass} = 4 AND ${cols.itemSubclass} IN (7, 8, 9)))
+        OR ${cols.itemSubclass} = ${relicParam}
       )`,
     );
   }
 
-  // Weapons: subclass must be allowed (non-weapons pass)
+  // Weapons: subclass must be allowed, except WEAPONOFFHAND (every class, no weapon-skill check).
   const weapons = [...weaponSubclassesForClass(cls), WEAPON_SUB.FISHING_POLE];
   params.push(weapons);
   const weaponsParam = `$${startParam + params.length - 1}`;
-  parts.push(`(item_class IS DISTINCT FROM 2 OR item_subclass = ANY(${weaponsParam}::int[]))`);
+  parts.push(
+    `(${cols.itemClass} IS DISTINCT FROM 2 OR ${invNorm} = 'WEAPONOFFHAND' OR ${cols.itemSubclass} = ANY(${weaponsParam}::int[]))`,
+  );
 
-  // Off-hand dual-wield / main-hand-only
+  // Off-hand: never MH-only / 2H; generic WEAPON only when dual-wield flip is on.
   if (slot === 'off_hand') {
-    parts.push(`(upper(replace(inventory_type, ' ', '')) NOT IN ('WEAPONMAINHAND', 'TWOHWEAPON', '2HWEAPON'))`);
-    if (!canDualWield(cls)) {
-      parts.push(`(upper(replace(inventory_type, ' ', '')) <> 'WEAPON')`);
+    parts.push(`(${invNorm} NOT IN ('WEAPONMAINHAND', 'TWOHWEAPON', '2HWEAPON'))`);
+    if (!classAllowsGenericWeaponInOffHand(cls)) {
+      parts.push(`(${invNorm} <> 'WEAPON')`);
     }
   }
 

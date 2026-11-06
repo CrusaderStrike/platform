@@ -671,6 +671,25 @@ describe('Forever items catalog', () => {
           region: 'us',
         },
         {
+          itemId: 13348,
+          name: 'Demonshear Offhand',
+          slot: 'off_hand',
+          slotAliases: [],
+          inventoryType: 'WEAPONOFFHAND',
+          quality: 'rare',
+          itemLevel: 63,
+          requiredLevel: 58,
+          armorType: null,
+          itemClass: 2,
+          itemSubclass: 13,
+          allowedClasses: null,
+          itemSetId: null,
+          stats: null,
+          iconUrl: null,
+          iconName: null,
+          region: 'us',
+        },
+        {
           itemId: 11263,
           name: 'Nether Force Wand',
           slot: 'ranged',
@@ -745,6 +764,7 @@ describe('Forever items catalog', () => {
       expect(ids).toContain(22490); // Dreamwalker via manual set
       expect(ids).toContain(22397); // idol
       expect(ids).toContain(19366); // held
+      expect(ids).toContain(13348); // WEAPONOFFHAND for all classes
       expect(ids).toContain(16914); // cloth ok for druid
       expect(ids).not.toContain(22418); // warrior T3
       expect(ids).not.toContain(22399); // libram
@@ -760,7 +780,7 @@ describe('Forever items catalog', () => {
       expect(dream.allowed_classes).toEqual(['druid']);
     });
 
-    it('class=warrior&slot=off_hand allows shield and dual-wield 1H; class=mage does not', async () => {
+    it('class=warrior&slot=off_hand allows shield, dual-wield 1H, WEAPONOFFHAND; mage gets held+WEAPONOFFHAND only', async () => {
       await seedEquipCatalog();
       const war = await ctx.app.inject({
         method: 'GET',
@@ -769,8 +789,9 @@ describe('Forever items catalog', () => {
       expect(war.statusCode).toBe(200);
       const warIds = (war.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
       expect(warIds).toContain(19348); // shield
-      expect(warIds).toContain(1935); // 1H dagger via aliases
+      expect(warIds).toContain(1935); // generic WEAPON dagger via aliases (dual-wield)
       expect(warIds).toContain(19366); // held
+      expect(warIds).toContain(13348); // WEAPONOFFHAND fist
 
       const mage = await ctx.app.inject({
         method: 'GET',
@@ -778,9 +799,21 @@ describe('Forever items catalog', () => {
       });
       expect(mage.statusCode).toBe(200);
       const mageIds = (mage.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
-      expect(mageIds).toContain(19366);
-      expect(mageIds).not.toContain(19348);
-      expect(mageIds).not.toContain(1935);
+      expect(mageIds).toContain(19366); // held — all classes
+      expect(mageIds).toContain(13348); // WEAPONOFFHAND — all classes, even fist subclass mage lacks
+      expect(mageIds).not.toContain(19348); // shield restricted
+      expect(mageIds).not.toContain(1935); // generic WEAPON requires dual-wield
+
+      const priest = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/items?class=priest&slot=off_hand',
+      });
+      expect(priest.statusCode).toBe(200);
+      const priestIds = (priest.json() as { items: { item_id: number }[] }).items.map((i) => i.item_id);
+      expect(priestIds).toContain(13348);
+      expect(priestIds).toContain(19366);
+      expect(priestIds).not.toContain(19348);
+      expect(priestIds).not.toContain(1935);
     });
 
     it('class=hunter gets ammo; class=priest gets wands not guns/ammo', async () => {
